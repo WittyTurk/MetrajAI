@@ -823,6 +823,18 @@ function ElementReview({ api, projectId, element, onChanged }: { api: EngineApi;
     thickness_note_handles: string[];
     thickness_texts: string[];
   } | undefined;
+  const foundationWallEvidence = element.properties.foundation_wall_evidence as {
+    annotation_text: string;
+    annotation_handle: string;
+    hatch_handle: string;
+    translated_copy_count: number;
+  } | undefined;
+  const scheduleEvidence = element.properties.schedule_evidence as {
+    table_handle: string;
+    table_block: string;
+    row_number: number;
+    declared_area_text: string;
+  } | undefined;
   const stairEvidence = element.properties.stair_evidence as {
     label: string;
     annotation_text: string;
@@ -869,7 +881,13 @@ function ElementReview({ api, projectId, element, onChanged }: { api: EngineApi;
         <div className="evidence-note"><Ruler size={17} /><span><strong>Döşeme paneli · {slabEvidence.label}</strong>Net alan {formatQuantity(element.measurements.area_m2)} m² · {slabEvidence.thickness_text}<small>{slabEvidence.boundary_layers.join(" / ")} sınırları · algılanan boşluk: {slabEvidence.void_count}{slabEvidence.void_area_m2 ? ` · ${formatQuantity(slabEvidence.void_area_m2)} m² düşüldü` : ""}</small></span></div>
       )}
       {foundationEvidence && (
-        <div className="evidence-note"><Ruler size={17} /><span><strong>Radye temel sınırı</strong>{formatQuantity(element.measurements.area_m2)} m² · {formatQuantity(element.measurements.thickness_m * 100)} cm<small>Aynı biçimli {foundationEvidence.translated_copy_count} çizim tek adayda birleştirildi; {foundationEvidence.boundary_handles.length} sınır ve {foundationEvidence.thickness_note_handles.length} kalınlık notu bağlı.</small></span></div>
+        <div className="evidence-note"><Ruler size={17} /><span><strong>Radye temel sınırı</strong>{formatQuantity(element.measurements.area_m2)} m² · {element.measurements.thickness_m ? `${formatQuantity(element.measurements.thickness_m * 100)} cm` : "kalınlık bekleniyor"}<small>Aynı biçimli {foundationEvidence.translated_copy_count} çizim tek adayda birleştirildi; {foundationEvidence.boundary_handles.length} sınır ve {foundationEvidence.thickness_note_handles.length} kalınlık notu bağlı.</small></span></div>
+      )}
+      {foundationWallEvidence && (
+        <div className="evidence-note"><Ruler size={17} /><span><strong>Temel perdesi ölçü etiketi</strong>{foundationWallEvidence.annotation_text}<small>Etiket {foundationWallEvidence.annotation_handle} · tarama {foundationWallEvidence.hatch_handle} · {foundationWallEvidence.translated_copy_count} eş çizim tek sayıldı.</small></span></div>
+      )}
+      {scheduleEvidence && (
+        <div className="evidence-note"><Ruler size={17} /><span><strong>Mahal çizelgesi · {String(element.properties.room_name ?? "")}</strong>{scheduleEvidence.declared_area_text}<small>Tablo {scheduleEvidence.table_handle} · satır {scheduleEvidence.row_number}{element.properties.floor_finish ? ` · döşeme: ${String(element.properties.floor_finish)}` : ""}</small></span></div>
       )}
       {stairEvidence && (
         <div className="evidence-note"><Ruler size={17} /><span><strong>Merdiven planı · {stairEvidence.label}</strong>{stairEvidence.step_count} rıhtım · {formatQuantity(stairEvidence.tread_m * 100)}/{formatQuantity(stairEvidence.riser_m * 100)} cm · toplam yükselme {formatQuantity(element.measurements.total_rise_m)} m<small>{stairEvidence.repeat_definition_required ? "Tip merdiven; kat aralığı tekrarı kullanıcı tarafından tanımlanmalı." : stairEvidence.scope_text}</small></span></div>
@@ -922,7 +940,7 @@ function previewContext(elements: DetectedElement[], selected?: DetectedElement)
 
 function GeometryPreview({ elements, selectedId, onSelect }: { elements: DetectedElement[]; selectedId?: string; onSelect: (id: string) => void }) {
   const drawingElements = useMemo(
-    () => elements.filter((item) => item.geometry.kind !== "rebar_schedule_row" && Boolean(item.geometry.bbox)),
+    () => elements.filter((item) => !item.geometry.kind.endsWith("_schedule_row") && Boolean(item.geometry.bbox)),
     [elements],
   );
   const selectedElement = elements.find((item) => item.id === selectedId);

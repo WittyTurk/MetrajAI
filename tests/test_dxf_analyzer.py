@@ -236,7 +236,7 @@ def test_architectural_room_boundaries_enter_engineer_review(tmp_path: Path) -> 
     doc = ezdxf.new("R2018")
     doc.header["$INSUNITS"] = 4
     doc.modelspace().add_lwpolyline(
-        [(0, 0), (200, 0), (200, 100), (0, 100)],
+        [(0, 0), (5000, 0), (5000, 4000), (0, 4000)],
         close=True,
         dxfattribs={"layer": "ALAN"},
     )
@@ -245,10 +245,143 @@ def test_architectural_room_boundaries_enter_engineer_review(tmp_path: Path) -> 
     elements, warnings, _ = DxfAnalyzer().analyze(source(path, Discipline.ARCHITECTURAL), path)
 
     room = next(item for item in elements if item.element_type == "room")
-    assert room.measurements["area_m2"] == pytest.approx(0.02)
-    assert room.measurements["perimeter_m"] == pytest.approx(0.6)
+    assert room.measurements["area_m2"] == pytest.approx(20.0)
+    assert room.measurements["perimeter_m"] == pytest.approx(18.0)
     assert room.review_status == ReviewStatus.PENDING
     assert any(warning.code == "ARCHITECTURAL_ENGINE_REVIEW_MODE" for warning in warnings)
+
+
+def test_architectural_room_schedule_replaces_tiny_alan_symbols_and_reconciles_area(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "architectural_schedule.dxf"
+    doc = ezdxf.new("R2018")
+    doc.header["$INSUNITS"] = 4
+    msp = doc.modelspace()
+    room_table = doc.blocks.new("ROOM_TABLE")
+    for value in (
+        "ZEMİN KAT MAHAL TABLOSU",
+        "MAHAL KODU",
+        "MAHAL ADI",
+        "NET ALAN",
+        "ZK01",
+        "GİRİŞ",
+        "9.90 M2",
+        "SERAMİK",
+        "BOYA",
+        "BOYA",
+        "ZK02",
+        "SALON",
+        "10.10 M2",
+        "SERAMİK",
+        "BOYA",
+        "BOYA",
+    ):
+        room_table.add_text(value)
+    msp.add_blockref("ROOM_TABLE", (0, 0))
+    totals = doc.blocks.new("AREA_TOTALS")
+    for value in (
+        "BAĞIMSIZ BÖLÜM TABLOSU",
+        "BB NET ALAN",
+        "BB BRÜT ALAN",
+        "20.10 M2",
+        "25.00 M2",
+    ):
+        totals.add_text(value)
+    msp.add_blockref("AREA_TOTALS", (1000, 0))
+    msp.add_lwpolyline(
+        [(0, 0), (200, 0), (200, 100), (0, 100)],
+        close=True,
+        dxfattribs={"layer": "ALAN"},
+    )
+    doc.saveas(path)
+
+    elements, warnings, _ = DxfAnalyzer().analyze(
+        source(path, Discipline.ARCHITECTURAL),
+        path,
+    )
+
+    rooms = [item for item in elements if item.element_type == "room"]
+    assert [item.properties["room_code"] for item in rooms] == ["ZK01", "ZK02"]
+    assert sum(item.measurements["area_m2"] for item in rooms) == pytest.approx(20.0)
+    assert all(item.geometry.kind == "architectural_schedule_row" for item in rooms)
+    assert all(item.floor == "Zemin Kat" for item in rooms)
+    codes = {warning.code for warning in warnings}
+    assert "ARCHITECTURAL_ROOM_SCHEDULE_EXTRACTED" in codes
+    assert "ARCHITECTURAL_NET_AREA_MISMATCH" in codes
+    assert "ARCHITECTURAL_GROSS_AREA_EVIDENCE" in codes
+
+
+def test_exported_foundation_edges_and_wall_labels_are_deduplicated(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "exported-foundation.dxf"
+    doc = ezdxf.new("R2018")
+    doc.header["$INSUNITS"] = 5
+    msp = doc.modelspace()
+
+    for index, points in enumerate(
+        (
+            [(0, 0), (1000, 0)],
+            [(1000, 0), (1000, 600)],
+            [(1000, 600), (0, 600)],
+            [(0, 600), (0, 0)],
+        )
+    ):
+        block = doc.blocks.new(f"RAFT_EDGE_{index}")
+        block.add_lwpolyline(points, dxfattribs={"layer": "RadyeDöşemeKenarı"})
+
+    for label, y in (("PZ01", 200), ("PZ02", 400)):
+        hatch_block = doc.blocks.new(f"WALL_{label}")
+        hatch = hatch_block.add_hatch(dxfattribs={"layer": "Perde"})
+        hatch.paths.add_polyline_path(
+            [(100, y), (600, y), (600, y + 25), (100, y + 25)],
+            is_closed=True,
+        )
+        label_block = doc.blocks.new(f"LABEL_{label}")
+        label_block.add_text(
+            f"{label} [+15.00] 500/75/25",
+            dxfattribs={"insert": (200, y)},
+        )
+
+    for root_y in (0, 2000):
+        for index in range(4):
+            msp.add_blockref(
+                f"RAFT_EDGE_{index}",
+                (0, root_y),
+                dxfattribs={"layer": "RadyeDöşemeKenarı"},
+            )
+        for label in ("PZ01", "PZ02"):
+            msp.add_blockref(
+                f"WALL_{label}",
+                (0, root_y),
+                dxfattribs={"layer": "Perde"},
+            )
+            msp.add_blockref(
+                f"LABEL_{label}",
+                (0, root_y),
+                dxfattribs={"layer": "Perde"},
+            )
+    doc.saveas(path)
+
+    elements, warnings, _ = DxfAnalyzer().analyze(
+        source(path, Discipline.STRUCTURAL),
+        path,
+    )
+
+    rafts = [item for item in elements if item.element_type == "raft"]
+    walls = [item for item in elements if item.element_type == "shear_wall"]
+    assert len(rafts) == 1
+    assert rafts[0].measurements["area_m2"] == pytest.approx(60.0)
+    assert rafts[0].measurements["perimeter_m"] == pytest.approx(32.0)
+    assert "missing:thickness_m" in rafts[0].issues
+    assert len(walls) == 2
+    assert {item.properties["element_label"] for item in walls} == {"PZ01", "PZ02"}
+    assert all(item.measurements["length_m"] == pytest.approx(5.0) for item in walls)
+    assert all(item.measurements["height_m"] == pytest.approx(0.75) for item in walls)
+    assert all(item.measurements["thickness_m"] == pytest.approx(0.25) for item in walls)
+    assert any(warning.code == "FOUNDATION_APPLICATION_PLAN_PARSED" for warning in warnings)
+    assert any(warning.code == "FOUNDATION_THICKNESS_REQUIRED" for warning in warnings)
 
 
 def test_structural_detail_sheet_is_reference_only_even_with_quantity_layers(

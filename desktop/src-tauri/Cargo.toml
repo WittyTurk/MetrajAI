@@ -1,6 +1,6 @@
 [package]
 name = "metrajai-desktop"
-version = "1.0.1"
+version = "1.0.2"
 description = "MetrajAI engineer-reviewed local quantity takeoff"
 authors = ["MetrajAI"]
 edition = "2021"

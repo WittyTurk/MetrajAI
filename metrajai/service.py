@@ -127,7 +127,11 @@ class EngineService:
                         ElementEvidence(
                             element_id=element.id,
                             source_id=element.source_id,
-                            kind=EvidenceKind.GEOMETRY,
+                            kind=(
+                                EvidenceKind.SCHEDULE
+                                if element.geometry.kind.endswith("_schedule_row")
+                                else EvidenceKind.GEOMETRY
+                            ),
                             label=str(element.properties.get("element_label", "")),
                             source_handle=element.source_handle,
                             bbox=element.geometry.bbox,

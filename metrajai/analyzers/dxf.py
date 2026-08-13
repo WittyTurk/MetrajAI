@@ -24,6 +24,8 @@ from ..contracts import (
     SourceFile,
 )
 from ..units import unit_from_insunits, unit_scale
+from .architectural_schedule import extract_architectural_schedules
+from .foundation_plan import extract_foundation_application_plans
 from .multiview_structural import (
     MultiviewStructuralResult,
     extract_multiview_structural_plans,
@@ -36,6 +38,14 @@ def normalize_name(value: str) -> str:
     text = unicodedata.normalize("NFKD", value or "")
     text = "".join(character for character in text if not unicodedata.combining(character)).upper()
     return " ".join(text.split())
+
+
+def _entity_text(entity) -> str:
+    if entity.dxftype() == "TEXT":
+        return str(entity.dxf.text).strip()
+    if entity.dxftype() == "MTEXT":
+        return str(entity.plain_text()).strip()
+    return ""
 
 
 @dataclass(frozen=True)
@@ -264,13 +274,99 @@ class DxfAnalyzer:
                     severity="info",
                 )
             )
+            extmin = document.header.get("$EXTMIN")
+            extmax = document.header.get("$EXTMAX")
+            if scale is not None and extmin is not None and extmax is not None:
+                physical_span = max(
+                    abs(float(extmax[0]) - float(extmin[0])) * scale,
+                    abs(float(extmax[1]) - float(extmin[1])) * scale,
+                )
+                if physical_span > 5000:
+                    warnings.append(
+                        AnalysisWarning(
+                            code="DXF_EXTENTS_OUTLIER_SUSPECTED",
+                            message=(
+                                f"{source.original_name}: DXF sınır kaydı {physical_span:g} m "
+                                "yayılıyor. Uzak/bozuk bloklar pafta görünümünden ayrıştırılacak "
+                                "ve metraja kanıt olmadan alınmayacak."
+                            ),
+                            source_id=source.id,
+                        )
+                    )
+
+            sheet_tokens: set[str] = set()
+            for entity in document.modelspace():
+                raw_text = _entity_text(entity)
+                if not raw_text:
+                    continue
+                value = normalize_name(raw_text)
+                for token in (
+                    "VAZIYET PLANI",
+                    "ZEMIN KAT PLANI",
+                    "CATI PLANI",
+                    "KESITLER",
+                    "GORUNUSLER",
+                ):
+                    if token in value:
+                        sheet_tokens.add(token)
+            if len(sheet_tokens) >= 3:
+                warnings.append(
+                    AnalysisWarning(
+                        code="MULTI_SHEET_ARCHITECTURAL_SOURCE",
+                        message=(
+                            f"{source.original_name} tek DXF içinde {len(sheet_tokens)} pafta "
+                            "bölgesi içeriyor: plan, kesit/görünüş ve çizelgeler kendi kanıt "
+                            "bağlamında değerlendirilecek."
+                        ),
+                        source_id=source.id,
+                        severity="info",
+                    )
+                )
+
+        if source.discipline == Discipline.STRUCTURAL:
+            project_labels: set[str] = set()
+            for entity in document.modelspace():
+                raw_text = _entity_text(entity)
+                if not raw_text:
+                    continue
+                value = normalize_name(raw_text)
+                if "TAZIYE EVI" in value:
+                    project_labels.add(value)
+            if len(project_labels) > 1:
+                warnings.append(
+                    AnalysisWarning(
+                        code="MULTIPLE_PROJECT_REGIONS_DETECTED",
+                        message=(
+                            f"{source.original_name} içinde {len(project_labels)} farklı "
+                            "proje başlığı bulundu. Aynı geometrili kopyalar yeniden "
+                            "sayılmayacak; proje kimliği raporda ayrıca doğrulanmalıdır."
+                        ),
+                        source_id=source.id,
+                    )
+                )
 
         elements: list[DetectedElement] = []
         generic_elements: list[DetectedElement] = []
         specialized_types: set[str] = set()
         specialized_activated = False
         multiview = MultiviewStructuralResult([], [], [], False)
+        if source.discipline == Discipline.ARCHITECTURAL:
+            schedule_result = extract_architectural_schedules(document, source)
+            if schedule_result.elements:
+                elements.extend(schedule_result.elements)
+                warnings.extend(schedule_result.warnings)
+                specialized_types.add("room")
         if source.discipline == Discipline.STRUCTURAL:
+            foundation = extract_foundation_application_plans(
+                document,
+                source,
+                chosen_unit,
+            )
+            if foundation.activated:
+                specialized_activated = True
+                elements.extend(foundation.elements)
+                warnings.extend(foundation.warnings)
+                specialized_types.update(("raft", "shear_wall"))
             structural = extract_structural_plans(document, source, chosen_unit)
             if structural.activated:
                 specialized_activated = True
@@ -539,6 +635,15 @@ class DxfAnalyzer:
             # A closed wall outline does not prove its center line or opening policy.
             # Keep it out until a paired-boundary wall detector is available.
             return None
+        elif rule.element_type == "room":
+            if entity.dxftype() == "LWPOLYLINE" and not bool(
+                getattr(entity, "closed", False)
+            ):
+                return None
+            if measurements.get("area_m2", 0.0) < 0.5:
+                # Tiny symbols and legend swatches are frequently placed on generic
+                # ALAN layers. They cannot be accepted as physical rooms.
+                return None
         elif rule.element_type == "shear_wall" and geometry.bbox is not None:
             small, large = sorted(
                 (

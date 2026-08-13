@@ -51,7 +51,10 @@ def main() -> None:
         raise SystemExit("Pilot kaynakları eksik: " + ", ".join(missing))
 
     analyzer = DxfAnalyzer()
-    taziye, _, _ = analyzer.analyze(source_for(paths["taziye"]), paths["taziye"])
+    taziye, _, _ = analyzer.analyze(
+        source_for(paths["taziye"], unit=DrawingUnit.CM),
+        paths["taziye"],
+    )
     sutculer, sutculer_warnings, _ = analyzer.analyze(
         source_for(paths["sutculer"], unit=DrawingUnit.CM),
         paths["sutculer"],
@@ -89,8 +92,15 @@ def main() -> None:
     }
     expected = {
         "taziye": {
-            "count": 88,
-            "by_type": {"beam": 24, "column": 9, "rebar": 39, "slab": 16},
+            "count": 101,
+            "by_type": {
+                "beam": 24,
+                "column": 9,
+                "raft": 1,
+                "rebar": 39,
+                "shear_wall": 12,
+                "slab": 16,
+            },
         },
         "defter": {
             "count": 90,
@@ -114,6 +124,22 @@ def main() -> None:
         for name, snapshot in snapshots.items()
         if snapshot != expected[name]
     ]
+    taziye_rafts = [item for item in taziye if item.element_type == "raft"]
+    taziye_foundation_walls = [
+        item for item in taziye if item.element_type == "shear_wall"
+    ]
+    if (
+        len(taziye_rafts) != 1
+        or abs(taziye_rafts[0].measurements.get("area_m2", 0.0) - 210.04) > 1e-6
+        or "missing:thickness_m" not in taziye_rafts[0].issues
+    ):
+        errors.append("Taziye: 210.04 m² radye sınırı/kalınlık güvenlik kapısı korunmadı")
+    if len(taziye_foundation_walls) != 12 or any(
+        item.measurements.get("height_m") != 0.75
+        or item.measurements.get("thickness_m") != 0.25
+        for item in taziye_foundation_walls
+    ):
+        errors.append("Taziye: 12 adet 25/75 cm PZ temel perdesi korunmadı")
     rafts = [item for item in sutculer if item.element_type == "raft"]
     stair_items = [item for item in sutculer if item.element_type == "stair"]
     void_total = round(
@@ -148,6 +174,15 @@ def main() -> None:
             "typical_stairs_blocked": sum(
                 "blocking:stair_floor_repeat_required" in item.issues for item in stair_items
             ),
+        },
+        "taziye_invariants": {
+            "raft_area_m2": (
+                taziye_rafts[0].measurements["area_m2"] if taziye_rafts else None
+            ),
+            "raft_thickness_blocked": bool(
+                taziye_rafts and "missing:thickness_m" in taziye_rafts[0].issues
+            ),
+            "foundation_wall_count": len(taziye_foundation_walls),
         },
         "errors": errors,
     }

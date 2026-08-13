@@ -229,7 +229,7 @@ class ProjectRegistry:
 
 def create_app(session_token: str | None = None) -> FastAPI:
     token = session_token or token_urlsafe(32)
-    app = FastAPI(title="MetrajAI Local Engine", version="1.0.1")
+    app = FastAPI(title="MetrajAI Local Engine", version="1.0.2")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
