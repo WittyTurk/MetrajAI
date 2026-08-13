@@ -119,17 +119,17 @@ doğrulamasında, açık lisanslı kaynaktan kontrollü DXF ve eleman bazlı alt
 .venv/bin/python scripts/reference_dataset.py validate --dataset pcert
 ```
 
-Komutlar `pcert`, `clinic` veya `all` veri setini kabul eder. Sabit commit, URL,
+Komutlar `pcert`, `duplex` veya `all` veri setini kabul eder. Sabit commit, URL,
 SHA-256, CC BY 4.0 lisansı ve atıf bilgisi `reference/manifest.json` içindedir.
 Kaynak IFC'ler önce şema ve EXPRESS doğrulamasından geçer; doğrulama hatası, checksum
 farkı veya zorunlu geometri üretim hatası kapıyı durdurur. Temiz DXF'lere ek olarak
 kopya/döndürme/aynalama, iç içe blok, açık polyline, bulge, boşluklu hatch, uzak
 geometri ve yanlış/eksik birim içeren kontrollü zor dosyalar oluşturulur.
 
-PCERT kapısı desteklenen elemanların GlobalId eşleşmesi ve ölçü toleransıyla geçer.
-Kaynak Medical–Dental Clinic IFC'leri mevcut sabit committe resmî doğrulayıcıdan
-geçmediği için Clinic ve v1.2 paketleme kapısı bilinçli olarak kapalı kalır; ayrıntı
-`reference-data/generated/clinic/ifc-validation.json` dosyasına yazılır.
+PCERT küçük resmî model kapısıdır. İkinci kapı; dört katlı, mimari elemanlarla birlikte
+`LoadBearing` kanıtlı duvar/döşeme, kiriş ve temel içeren buildingSMART Duplex
+Apartment modelidir. Birleşik IFC'den mimari ve statik altın setler ayrı üretilir;
+taşıyıcı niteliği olmayan duvar ve döşemeler statik setine alınmaz.
 
 ### macOS masaüstü penceresi
 
@@ -148,6 +148,8 @@ motorunu hedef platform sidecar adına paketler. `scripts/build_macos_ocr.py`, t
 PDF metnini cihazda okuyan Apple Vision yardımcısını derler. Excel raporu paket içindeki
 Python çalışma zamanıyla çevrimdışı üretilebilir; geliştirme ortamında isteğe bağlı
 artifact-tool doğrulama yolu da desteklenir. Bu pilot yalnız macOS için paketlenir.
+Pilot `.app` yerel ad-hoc kimlikle imzalanır ve paket bütünlüğü doğrulanabilir; Apple
+notarizasyonu ile Developer ID imzası ticari dağıtım aşamasına bırakılmıştır.
 
 ## Test kapsamı
 
@@ -179,15 +181,16 @@ eleman ve manuel kontrol toplamları sağlandığında özel test alanında olu�
 
 ## Durum
 
-1.1 macOS pilotu; güvenilir çekirdek ve statik inceleme hattına ek olarak kat planı
-bağlamını ayıran mimari motoru içerir. Mahaller, çift yüzlü duvarlar, kapı/pencere
-adayları ve mahal + yüzey + malzeme kırılımlı iç kaplamalar izlenebilir ilişkilerle
-üretilir. Eksik sınır, yükseklik, çizelge tipi veya duvar ilişkisi kesin metrajı
-kilitler; kullanıcı kararları gerekçe ve kaynakla SQLite şema v3'te saklanır. Excel
-raporu on bir sayfadır ve mimari brüt/açıklık/net alanlarını formüllü olarak gösterir.
+1.2 macOS pilotu, mimari/statik motoru kullanıcı paftalarından bağımsız ölçen açık
+kaynak doğrulama laboratuvarını içerir. Şema ve EXPRESS doğrulaması temiz olan PCERT
+ile Duplex modellerinden üretilen temiz ve kontrollü zor DXF'ler GlobalId düzeyinde
+karşılaştırılır. IFC ve türetilmiş dosyalar uygulama paketine veya Git deposuna girmez.
 
-Taranmış PDF OCR'ı cihazdan çıkmaz. Taziye Evi'nde ZK01-ZK10 ve 166,94 m² çizelge
-kanıtı korunur; 167,04 m² net ve 187,00 m² brüt değerleri ayrı kanıt olarak kalır.
+Taziye Evi'nde gerçek kat planı bağlamı kopya/görünüş/detay bölgelerinden ayrılır;
+"açılımlı pencere" açıklaması artık detay başlığı sayılmaz. DXF başlığındaki `mm` ile
+fiziksel alan kanıtı çeliştiğinde motor `cm` önerir ve kesin mimari metrajı kilitler.
+`cm` doğrulamasında ZK01-ZK10 ile 166,94 m² çizelge kanıtı korunur; çizelge ve plan
+alanı arasındaki `%1` üzeri farklar otomatik düzeltilmeden mühendis incelemesinde kalır.
 Defterdarlık uygulama, asma tavan ve mahal matrisi birlikte incelemeye alınır.
 Sütçüler mimari kaynakları ve üç projenin mühendis altın referansları tamamlanmadan
 mimari disiplin `reliable` durumuna geçirilmez. Mekanik ve elektrik kesin metrajı da

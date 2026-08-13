@@ -449,6 +449,16 @@ def _element_relationships(element) -> dict[str, list[str]]:
     }
 
 
+def _is_supported_candidate(element, discipline: str, element_type: str) -> bool:
+    if discipline != "structural" or element_type not in {"shear_wall", "slab"}:
+        return True
+    import ifcopenshell.util.element
+
+    property_set = "Pset_WallCommon" if element_type == "shear_wall" else "Pset_SlabCommon"
+    values = ifcopenshell.util.element.get_psets(element).get(property_set, {})
+    return values.get("LoadBearing") is True
+
+
 def _measurements(element_type: str, geometry: dict[str, float]) -> dict[str, float]:
     major = geometry.get("major_m", 0.0)
     minor = geometry.get("minor_m", 0.0)
@@ -512,7 +522,11 @@ def extract_ifc_golden(
     records: list[dict[str, Any]] = []
     for guid, element in sorted(candidates.items()):
         element_type = class_map.get(element.is_a())
-        if not element_type:
+        if not element_type or not _is_supported_candidate(
+            element,
+            source["discipline"],
+            element_type,
+        ):
             continue
         record: dict[str, Any] = {
             "global_id": guid,
@@ -1188,22 +1202,30 @@ def validate_references(
     root = cache_root(manifest, data_root)
     reports: list[dict[str, Any]] = []
     prior_passed = True
-    for dataset in select_datasets(manifest, selected):
-        if dataset["id"] == "clinic" and selected == "all" and not prior_passed:
-            raise ReferenceLabError("PCERT kapısı geçmeden Clinic doğrulaması çalıştırılamaz.")
+    for index, dataset in enumerate(select_datasets(manifest, selected)):
+        if index > 0 and selected == "all" and not prior_passed:
+            raise ReferenceLabError(
+                "Önceki referans kapısı geçmeden sonraki veri seti doğrulanamaz."
+            )
         generated_path = root / "generated" / dataset["id"] / "generated-manifest.json"
         if not generated_path.exists():
             raise ReferenceLabError(
                 f"Üretilmiş manifest yok: {generated_path}; önce build çalıştırın."
             )
         generated = _json_load(generated_path)
-        golden_by_guid: dict[str, dict[str, Any]] = {}
+        golden_by_source: dict[str, dict[str, dict[str, Any]]] = {}
         for source in dataset["sources"]:
             golden_path = root / "generated" / dataset["id"] / "golden" / f"{source['id']}.json"
             golden = _json_load(golden_path)
-            golden_by_guid.update({record["global_id"]: record for record in golden["elements"]})
+            golden_by_source[source["id"]] = {
+                record["global_id"]: record for record in golden["elements"]
+            }
         file_reports = [
-            _compare_file(file_record, golden_by_guid, float(dataset["clean_tolerance_ratio"]))
+            _compare_file(
+                file_record,
+                golden_by_source[file_record["source_id"]],
+                float(dataset["clean_tolerance_ratio"]),
+            )
             for file_record in generated["files"]
         ]
         passed = bool(file_reports) and all(report["passed"] for report in file_reports)
@@ -1226,7 +1248,7 @@ def validate_references(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="MetrajAI IFC/DXF doğrulama laboratuvarı")
     parser.add_argument("command", choices=("fetch", "build", "validate", "all"))
-    parser.add_argument("--dataset", choices=("pcert", "clinic", "all"), default="all")
+    parser.add_argument("--dataset", choices=("pcert", "duplex", "all"), default="all")
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--data-root", type=Path)
     return parser

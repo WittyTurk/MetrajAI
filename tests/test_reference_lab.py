@@ -22,7 +22,7 @@ from metrajai.reference_lab import (
 def test_reference_manifest_pins_license_attribution_commit_and_checksum() -> None:
     manifest = load_manifest(DEFAULT_MANIFEST)
 
-    assert [dataset["id"] for dataset in manifest["datasets"]] == ["pcert", "clinic"]
+    assert [dataset["id"] for dataset in manifest["datasets"]] == ["pcert", "duplex"]
     for dataset in manifest["datasets"]:
         assert dataset["license"] == "CC-BY-4.0"
         assert dataset["attribution"]

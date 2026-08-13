@@ -195,10 +195,44 @@ def test_written_room_area_blocks_wrong_dxf_unit_instead_of_silent_scaling(
 
     elements, warnings, _ = DxfAnalyzer().analyze(source(path), path)
 
-    assert any(item.code == "ARCHITECTURAL_UNIT_EVIDENCE_MISMATCH" for item in warnings)
+    mismatch = next(
+        item for item in warnings if item.code == "ARCHITECTURAL_UNIT_EVIDENCE_MISMATCH"
+    )
+    assert "cm olarak doğrulanması" in mismatch.message
     assert all(
         "blocking:drawing_unit_evidence_mismatch" in item.issues for item in elements
     )
+
+
+def test_openable_window_description_is_not_mistaken_for_detail_title(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "openable-window-plan.dxf"
+    document = ezdxf.new("R2018")
+    document.header["$INSUNITS"] = 4
+    modelspace = document.modelspace()
+    modelspace.add_text(
+        "ZEMİN KAT PLANI",
+        dxfattribs={"insert": (0, -1000), "layer": "BASLIK"},
+    )
+    modelspace.add_text(
+        "ahşap görünümlü çift açılımlı pencere",
+        dxfattribs={"insert": (2000, 1500), "layer": "MALZEME"},
+    )
+    modelspace.add_text("ZK01", dxfattribs={"insert": (2000, 1500), "layer": "MAHAL NO"})
+    modelspace.add_lwpolyline(
+        [(0, 0), (4000, 0), (4000, 3000), (0, 3000)],
+        close=True,
+        dxfattribs={"layer": "ALAN"},
+    )
+    document.saveas(path)
+
+    elements, _, _ = DxfAnalyzer().analyze(source(path), path)
+
+    rooms = [item for item in elements if item.element_type == "room"]
+    assert len(rooms) == 1
+    assert rooms[0].properties["room_code"] == "ZK01"
+    assert rooms[0].measurements["area_m2"] == pytest.approx(12.0)
 
 
 def test_schema_v3_persists_traceable_architectural_assignment(tmp_path: Path) -> None:

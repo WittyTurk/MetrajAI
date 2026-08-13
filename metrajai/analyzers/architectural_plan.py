@@ -21,10 +21,20 @@ from ..contracts import (
     SourceFile,
 )
 from ..units import unit_scale
-from .architectural_schedule import _normalize, extract_opening_schedule
+from .architectural_schedule import (
+    _normalize,
+    extract_architectural_schedules,
+    extract_opening_schedule,
+)
 
 PLAN_TOKENS = ("KAT PLANI", "ZEMIN KAT", "BODRUM KAT", "NORMAL KAT")
-EXCLUDED_TOKENS = ("KESIT", "GORUNUS", "DETAY", "VAZIYET", "CIZELGE", "ACILIM")
+EXCLUDED_TOKENS = ("KESIT", "GORUNUS", "DETAY", "VAZIYET", "CIZELGE")
+EXCLUDED_TITLE_PHRASES = (
+    "KAPI PENCERE ACILIMI",
+    "KAPI-PENCERE ACILIMI",
+    "ACILIM DETAYI",
+    "DUVAR ACILIMI",
+)
 ROOM_TOKENS = ("MAHAL", "ODA", "ROOM", "ALAN")
 WALL_TOKENS = ("DUVAR", "WALL", "SIVA")
 DOOR_TOKENS = ("KAPI", "DOOR")
@@ -35,6 +45,17 @@ OPENING_LABEL = re.compile(
 )
 HEIGHT_BAND = re.compile(r"H\s*[:=]\s*(\d+(?:[.,]\d+)?)\s*CM", re.IGNORECASE)
 AREA_LABEL = re.compile(r"(?P<area>\d+(?:[.,]\d+)?)\s*M(?:2|²)", re.IGNORECASE)
+
+
+def _context_title(value: str) -> tuple[str, str] | None:
+    normalized = _normalize(value)
+    if not normalized or len(normalized) > 100:
+        return None
+    if any(token in normalized for token in PLAN_TOKENS):
+        return normalized, "plan"
+    if any(token in normalized for token in EXCLUDED_TOKENS + EXCLUDED_TITLE_PHRASES):
+        return normalized, "reference"
+    return None
 
 
 @dataclass(frozen=True)
@@ -184,6 +205,8 @@ def _room_code_near(
     candidates: list[tuple[float, str]] = []
     center = _center(box)
     for raw, text_box in texts:
+        if AREA_LABEL.search(raw):
+            continue
         match = ROOM_CODE.search(_normalize(raw))
         if match is None:
             continue
@@ -303,6 +326,14 @@ def reconcile_architectural_elements(
         room.measurements["geometric_area_m2"] = geometric
         room.properties["boundary_element_id"] = boundary.id
         room.properties["boundary_source_handle"] = boundary.source_handle
+        boundary_blocking = [
+            issue
+            for issue in boundary.issues
+            if issue.startswith("blocking:") and issue not in room.issues
+        ]
+        if boundary_blocking:
+            room.issues.extend(boundary_blocking)
+            room.review_status = ReviewStatus.NEEDS_REVIEW
         difference_ratio = abs(geometric - scheduled) / scheduled if scheduled else 1.0
         room.properties["area_difference_ratio"] = difference_ratio
         if difference_ratio > 0.01:
@@ -538,6 +569,22 @@ def extract_architectural_plan(
             seen_plan_blocks.add(signature)
     if duplicate_roots:
         flat = [item for item in flat if item.path.split("/", 1)[0] not in duplicate_roots]
+    explicit_plan_roots: set[str] = set()
+    for root, group in grouped_by_root.items():
+        if root in duplicate_roots or group[0].entity.dxftype() != "INSERT":
+            continue
+        root_box = _entity_bbox(group[0], scale)
+        if root_box is None:
+            continue
+        area_outline_count = sum(
+            candidate.entity.dxftype() in {"LWPOLYLINE", "HATCH"}
+            and bool(getattr(candidate.entity, "closed", False))
+            and "ALAN" in _normalize(candidate.layer)
+            and "M2" in _normalize(candidate.layer)
+            for candidate in group[1:]
+        )
+        if 4 <= area_outline_count <= 30:
+            explicit_plan_roots.add(root)
     boxes = [(item, box) for item in flat if (box := _entity_bbox(item, scale)) is not None]
     if not boxes:
         return [], []
@@ -548,39 +595,85 @@ def extract_architectural_plan(
     texts = [(_text(item), box) for item, box in usable if _text(item)]
     opening_schedule = extract_opening_schedule(document)
     titles = [
-        (_normalize(value), box)
+        (title, kind, box)
         for value, box in texts
-        if any(token in _normalize(value) for token in PLAN_TOKENS + EXCLUDED_TOKENS)
+        if (context := _context_title(value)) is not None
+        for title, kind in (context,)
     ]
 
-    def excluded(box):
+    def excluded(item: _FlatEntity, box):
+        root = item.path.split("/", 1)[0]
+        if explicit_plan_roots:
+            return root not in explicit_plan_roots
         if not titles:
             return False
-        value, _ = min(titles, key=lambda title: math.dist(_center(box), _center(title[1])))
-        return any(token in value for token in EXCLUDED_TOKENS) and not any(
-            token in value for token in PLAN_TOKENS
+        _, kind, _ = min(
+            titles,
+            key=lambda title: math.dist(_center(box), _center(title[2])),
         )
+        return kind == "reference"
+
+    room_data: dict[str, tuple[float, float, list[tuple[float, float]]]] = {}
+    room_rows: list[tuple[_FlatEntity, tuple[float, float, float, float], float]] = []
+    room_fingerprints: set[tuple[float, float, float, float]] = set()
+    for item, box in usable:
+        entity = item.entity
+        layer = _normalize(item.layer)
+        if (
+            excluded(item, box)
+            or not any(token in layer for token in ROOM_TOKENS)
+            or entity.dxftype() not in {"LWPOLYLINE", "HATCH"}
+            or (entity.dxftype() == "LWPOLYLINE" and not bool(getattr(entity, "closed", False)))
+        ):
+            continue
+        area, perimeter, points = _poly_metrics(item, scale)
+        explicit_area_outline = "ALAN" in layer and "M2" in layer
+        if area < (0.00001 if explicit_area_outline else 0.5):
+            continue
+        room_box_fingerprint = (
+            round(box[0], 4),
+            round(box[1], 4),
+            round(box[2], 4),
+            round(box[3], 4),
+        )
+        if room_box_fingerprint in room_fingerprints:
+            continue
+        room_fingerprints.add(room_box_fingerprint)
+        room_data[item.path] = (area, perimeter, points)
+        room_rows.append((item, box, area))
+    container_room_paths: set[str] = set()
+    for item, box, area in room_rows:
+        contained = [
+            other_area
+            for other_item, other_box, other_area in room_rows
+            if other_item.path != item.path
+            and box[0] <= _center(other_box)[0] <= box[2]
+            and box[1] <= _center(other_box)[1] <= box[3]
+            and other_area < area
+        ]
+        if len(contained) >= 2 and area > max(contained) * 1.5:
+            container_room_paths.add(item.path)
 
     elements: list[DetectedElement] = []
     wall_candidates: list[DetectedElement] = []
     seen: set[tuple] = set()
     for item, box in usable:
-        if excluded(box):
+        if excluded(item, box):
             continue
         entity = item.entity
         layer = _normalize(item.layer)
         kind = entity.dxftype()
         identity = item.path
         if any(token in layer for token in ROOM_TOKENS) and kind in {"LWPOLYLINE", "HATCH"}:
-            if kind == "LWPOLYLINE" and not bool(getattr(entity, "closed", False)):
+            if identity not in room_data or identity in container_room_paths:
                 continue
-            area, perimeter, points = _poly_metrics(item, scale)
+            area, perimeter, points = room_data[identity]
             if area < 0.5:
                 continue
-            fingerprint = ("room", tuple(round(value, 4) for value in box))
-            if fingerprint in seen:
+            element_fingerprint = ("room", tuple(round(value, 4) for value in box))
+            if element_fingerprint in seen:
                 continue
-            seen.add(fingerprint)
+            seen.add(element_fingerprint)
             code = _room_code_near(box, texts)
             wall_candidates.append(
                 DetectedElement(
@@ -638,8 +731,11 @@ def extract_architectural_plan(
     elements.extend(wall_candidates)
     walls = [item for item in elements if item.element_type == "wall"]
     rooms = [item for item in elements if item.element_type == "room"]
+    opening_root_paths: set[str] = set()
     for item, box in usable:
-        if excluded(box) or item.entity.dxftype() not in {"INSERT", "ARC"}:
+        if excluded(item, box) or item.entity.dxftype() not in {"INSERT", "ARC"}:
+            continue
+        if any(item.path.startswith(f"{path}/") for path in opening_root_paths):
             continue
         opening_signature = _normalize(f"{item.layer} {item.block_name}")
         if any(token in opening_signature for token in EXCLUDED_TOKENS):
@@ -651,6 +747,7 @@ def extract_architectural_plan(
             element_type = "window"
         if not element_type:
             continue
+        opening_root_paths.add(item.path)
         width = abs(box[2] - box[0])
         height = abs(box[3] - box[1])
         if item.entity.dxftype() == "ARC":
@@ -744,6 +841,17 @@ def extract_architectural_plan(
                 severity="info",
             )
         )
+    schedule_areas = {
+        str(element.properties.get("room_code", "")): element.measurements["area_m2"]
+        for element in extract_architectural_schedules(document, source).elements
+    }
+    ratios = [
+        schedule_areas[code] / area
+        for room_item, box, area in room_rows
+        if area > 0
+        and room_item.path not in container_room_paths
+        and (code := _room_code_near(box, texts)) in schedule_areas
+    ]
     declared_areas = [
         (float(match.group("area").replace(",", ".")), box)
         for value, box in texts
@@ -758,20 +866,21 @@ def extract_architectural_plan(
         area, _, _ = _poly_metrics(item, scale)
         if area > 0:
             area_boundaries.append((area, box))
-    ratios: list[float] = []
-    for declared, label_box in declared_areas:
-        label_center = _center(label_box)
-        nearby = sorted(
-            (
-                (math.dist(label_center, _center(boundary_box)), area)
-                for area, boundary_box in area_boundaries
-                if boundary_box[0] - 0.1 <= label_center[0] <= boundary_box[2] + 0.1
-                and boundary_box[1] - 0.1 <= label_center[1] <= boundary_box[3] + 0.1
-            ),
-            key=lambda value: value[0],
-        )
-        if nearby and nearby[0][0] <= 10:
-            ratios.append(declared / nearby[0][1])
+    if len(ratios) < 3:
+        ratios = []
+        for declared, label_box in declared_areas:
+            label_center = _center(label_box)
+            nearby = sorted(
+                (
+                    (math.dist(label_center, _center(boundary_box)), area)
+                    for area, boundary_box in area_boundaries
+                    if boundary_box[0] - 0.1 <= label_center[0] <= boundary_box[2] + 0.1
+                    and boundary_box[1] - 0.1 <= label_center[1] <= boundary_box[3] + 0.1
+                ),
+                key=lambda value: value[0],
+            )
+            if nearby and nearby[0][0] <= 10:
+                ratios.append(declared / nearby[0][1])
     unit_mismatch = bool(ratios) and not 0.8 <= median(ratios) <= 1.2
     if unit_mismatch:
         for element in elements:

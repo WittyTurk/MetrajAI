@@ -91,6 +91,12 @@ def main() -> None:
     BINARIES.mkdir(parents=True, exist_ok=True)
     destination = BINARIES / f"metrajai-engine-{rust_target()}{suffix}"
     shutil.copy2(source, destination)
+    subprocess.run(
+        [str(destination), "--help"],
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
     print(destination)
 
 
