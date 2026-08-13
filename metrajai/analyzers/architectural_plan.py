@@ -198,6 +198,117 @@ def _center(box: tuple[float, float, float, float]) -> tuple[float, float]:
     return (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
 
 
+def _merge_collinear_wall_segments(
+    source: SourceFile,
+    candidates: list[DetectedElement],
+) -> list[DetectedElement]:
+    """Join aligned wall footprints separated by a plan opening.
+
+    Architectural plans often draw one physical wall as two closed footprints
+    around a door/window gap.  The gap is retained as reviewable evidence; its
+    height is never invented here.
+    """
+
+    other = [item for item in candidates if item.element_type != "wall"]
+    walls = [item for item in candidates if item.element_type == "wall"]
+    used: set[int] = set()
+    merged: list[DetectedElement] = []
+
+    def wall_axis(item: DetectedElement) -> tuple[str, float, float, float, float]:
+        box = item.geometry.bbox
+        assert box is not None
+        horizontal = abs(box[2] - box[0]) >= abs(box[3] - box[1])
+        thickness = float(item.measurements["thickness_m"])
+        if horizontal:
+            return "h", (box[1] + box[3]) / 2, box[0], box[2], thickness
+        return "v", (box[0] + box[2]) / 2, box[1], box[3], thickness
+
+    for index, seed in enumerate(walls):
+        if index in used:
+            continue
+        group = [index]
+        used.add(index)
+        changed = True
+        while changed:
+            changed = False
+            group_axes = [wall_axis(walls[item_index]) for item_index in group]
+            group_start = min(axis[2] for axis in group_axes)
+            group_end = max(axis[3] for axis in group_axes)
+            for candidate_index, candidate in enumerate(walls):
+                if candidate_index in used or candidate.layer != seed.layer:
+                    continue
+                seed_root = seed.source_handle.split("/", 1)[0]
+                candidate_root = candidate.source_handle.split("/", 1)[0]
+                if "/" not in seed.source_handle or candidate_root != seed_root:
+                    continue
+                axis = wall_axis(candidate)
+                seed_axis = wall_axis(seed)
+                if axis[0] != seed_axis[0]:
+                    continue
+                if abs(axis[1] - seed_axis[1]) > max(0.01, max(axis[4], seed_axis[4]) * 0.25):
+                    continue
+                if abs(axis[4] - seed_axis[4]) > max(0.01, max(axis[4], seed_axis[4]) * 0.2):
+                    continue
+                gap = max(group_start, axis[2]) - min(group_end, axis[3])
+                if gap > 2.5 or gap < -0.02:
+                    continue
+                group.append(candidate_index)
+                used.add(candidate_index)
+                changed = True
+
+        members = [walls[item_index] for item_index in group]
+        if len(members) == 1:
+            merged.append(seed)
+            continue
+        axes = [wall_axis(item) for item in members]
+        orientation = axes[0][0]
+        start = min(axis[2] for axis in axes)
+        end = max(axis[3] for axis in axes)
+        cross = median(axis[1] for axis in axes)
+        thickness = median(axis[4] for axis in axes)
+        segment_length = sum(axis[3] - axis[2] for axis in axes)
+        opening_gap = max(0.0, end - start - segment_length)
+        half = thickness / 2
+        if orientation == "h":
+            box = (start, cross - half, end, cross + half)
+            points = [(start, cross), (end, cross)]
+        else:
+            box = (cross - half, start, cross + half, end)
+            points = [(cross, start), (cross, end)]
+        handles = sorted(item.source_handle for item in members)
+        identity = "+".join(handles)
+        issues = sorted({issue for item in members for issue in item.issues})
+        if opening_gap > 0.01:
+            issues.append("blocking:opening_dimensions_required")
+        merged.append(
+            DetectedElement(
+                id=_stable_id(source, "wall", identity),
+                source_id=source.id,
+                discipline=source.discipline,
+                element_type="wall",
+                floor=source.floor,
+                layer=seed.layer,
+                source_handle=identity,
+                geometry=Geometry(kind="collinear_wall_with_gap", points=points, bbox=box),
+                measurements={
+                    "length_m": end - start,
+                    "thickness_m": thickness,
+                    "opening_gap_width_m": opening_gap,
+                },
+                properties={
+                    "wall_detection_method": "collinear_closed_boundaries_with_gap",
+                    "segment_handles": handles,
+                    "opening_gap_width_m": opening_gap,
+                },
+                required_inputs=["length_m", "height_m"],
+                confidence=min(item.confidence for item in members),
+                review_status=ReviewStatus.NEEDS_REVIEW,
+                issues=issues,
+            )
+        )
+    return other + merged
+
+
 def _room_code_near(
     box: tuple[float, float, float, float],
     texts: list[tuple[str, tuple[float, float, float, float]]],
@@ -643,6 +754,8 @@ def extract_architectural_plan(
         room_rows.append((item, box, area))
     container_room_paths: set[str] = set()
     for item, box, area in room_rows:
+        if _room_code_near(box, texts):
+            continue
         contained = [
             other_area
             for other_item, other_box, other_area in room_rows
@@ -700,7 +813,7 @@ def extract_architectural_plan(
             and bool(getattr(entity, "closed", False))
         ):
             small, large = sorted((abs(box[2] - box[0]), abs(box[3] - box[1])))
-            if not (0.05 <= small <= 1.0 and 0.5 <= large <= 100):
+            if not (0.01 <= small <= 1.0 and 0.25 <= large <= 100):
                 continue
             horizontal = abs(box[2] - box[0]) >= abs(box[3] - box[1])
             center = _center(box)
@@ -728,7 +841,7 @@ def extract_architectural_plan(
                 )
             )
 
-    elements.extend(wall_candidates)
+    elements.extend(_merge_collinear_wall_segments(source, wall_candidates))
     walls = [item for item in elements if item.element_type == "wall"]
     rooms = [item for item in elements if item.element_type == "room"]
     opening_root_paths: set[str] = set()

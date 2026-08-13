@@ -31,6 +31,87 @@
       ]
     },
     {
+      "id": "pcert43",
+      "name": "buildingSMART PCERT Sample Scene IFC4.3",
+      "source_page": "https://github.com/buildingSMART/Sample-Test-Files/tree/cecf656112a54a0d8cdd8b06b9398bfea5163886/IFC%204.3.2.0%20%28IFC4X3_ADD2%29/PCERT-Sample-Scene",
+      "commit": "cecf656112a54a0d8cdd8b06b9398bfea5163886",
+      "license": "CC-BY-4.0",
+      "attribution": "buildingSMART International Ltd., PCERT Sample Scene IFC4.3",
+      "clean_tolerance_ratio": 0.001,
+      "sources": [
+        {
+          "id": "pcert43-architecture",
+          "discipline": "architectural",
+          "filename": "Building-Architecture.ifc",
+          "url": "https://raw.githubusercontent.com/buildingSMART/Sample-Test-Files/cecf656112a54a0d8cdd8b06b9398bfea5163886/IFC%204.3.2.0%20(IFC4X3_ADD2)/PCERT-Sample-Scene/Building-Architecture.ifc",
+          "sha256": "a42962f9e2068040ac96636b1e7f6117150b6c0e3371f81088721b22796e463f",
+          "size_bytes": 220789
+        },
+        {
+          "id": "pcert43-structural",
+          "discipline": "structural",
+          "filename": "Building-Structural.ifc",
+          "url": "https://raw.githubusercontent.com/buildingSMART/Sample-Test-Files/cecf656112a54a0d8cdd8b06b9398bfea5163886/IFC%204.3.2.0%20(IFC4X3_ADD2)/PCERT-Sample-Scene/Building-Structural.ifc",
+          "sha256": "0343d5222d38e6be8ac7c31045c692e62c6018c80ea60d2f6023e73b846247ab",
+          "size_bytes": 292276
+        }
+      ]
+    },
+    {
+      "id": "ifc4-official-components",
+      "name": "buildingSMART IFC4 Reference View Components",
+      "source_page": "https://github.com/buildingSMART/Sample-Test-Files/tree/cecf656112a54a0d8cdd8b06b9398bfea5163886/IFC%204.0.2.1%20%28IFC%204%29/ISO%20Spec%20-%20ReferenceView_V1.2",
+      "commit": "cecf656112a54a0d8cdd8b06b9398bfea5163886",
+      "license": "CC-BY-4.0",
+      "attribution": "buildingSMART International Ltd., IFC4 Reference View examples",
+      "clean_tolerance_ratio": 0.001,
+      "sources": [
+        {
+          "id": "ifc4-wall-opening-window",
+          "discipline": "architectural",
+          "filename": "wall-with-opening-and-window.ifc",
+          "url": "https://raw.githubusercontent.com/buildingSMART/Sample-Test-Files/cecf656112a54a0d8cdd8b06b9398bfea5163886/IFC%204.0.2.1%20(IFC%204)/ISO%20Spec%20-%20ReferenceView_V1.2/wall-with-opening-and-window.ifc",
+          "sha256": "73b0e45d931d5dc13bfee5fdc7bd80f796526445458b2de74c4168d209097832",
+          "size_bytes": 12492
+        },
+        {
+          "id": "ifc4-column-tessellation",
+          "discipline": "structural",
+          "filename": "column-straight-rectangle-tessellation.ifc",
+          "url": "https://raw.githubusercontent.com/buildingSMART/Sample-Test-Files/cecf656112a54a0d8cdd8b06b9398bfea5163886/IFC%204.0.2.1%20(IFC%204)/ISO%20Spec%20-%20ReferenceView_V1.2/column-straight-rectangle-tessellation.ifc",
+          "sha256": "58bb9b2cae96edf2c368de95f526650f3f282e4e7fc37c0065c501bdbeed00a1",
+          "size_bytes": 4594
+        }
+      ]
+    },
+    {
+      "id": "ifc4-community-components",
+      "name": "buildingSMART Community IFC4 Geometry Components",
+      "source_page": "https://github.com/buildingsmart-community/Community-Sample-Test-Files/tree/7ddf57a201f88a0c213d5322b02ed15e94a60a40/IFC%204.0.2.1%20%28IFC%204%29/ISO%20Spec%20archive",
+      "commit": "7ddf57a201f88a0c213d5322b02ed15e94a60a40",
+      "license": "CC-BY-4.0",
+      "attribution": "Original authors, buildingSMART Community IFC4 ISO Spec archive",
+      "clean_tolerance_ratio": 0.001,
+      "sources": [
+        {
+          "id": "ifc4-slab-openings",
+          "discipline": "architectural",
+          "filename": "slab-openings.ifc",
+          "url": "https://media.githubusercontent.com/media/buildingsmart-community/Community-Sample-Test-Files/7ddf57a201f88a0c213d5322b02ed15e94a60a40/IFC%204.0.2.1%20(IFC%204)/ISO%20Spec%20archive/slab-openings.ifc",
+          "sha256": "ad8708583a490eda9d44196067e64fa15c6a585a596951275312f09d3249d1bc",
+          "size_bytes": 4706
+        },
+        {
+          "id": "ifc4-beam-extruded-solid",
+          "discipline": "structural",
+          "filename": "beam-extruded-solid.ifc",
+          "url": "https://media.githubusercontent.com/media/buildingsmart-community/Community-Sample-Test-Files/7ddf57a201f88a0c213d5322b02ed15e94a60a40/IFC%204.0.2.1%20(IFC%204)/ISO%20Spec%20archive/beam-extruded-solid.ifc",
+          "sha256": "bb64226a58cde416d91c3471b4f1a62ba41c22d756d1e69297a63b9482c76d1a",
+          "size_bytes": 5764
+        }
+      ]
+    },
+    {
       "id": "duplex",
       "name": "buildingSMART Duplex Apartment",
       "source_page": "https://github.com/buildingsmart-community/Community-Sample-Test-Files/tree/7ddf57a201f88a0c213d5322b02ed15e94a60a40/IFC%202.3.0.1%20%28IFC%202x3%29/Duplex%20Apartment",

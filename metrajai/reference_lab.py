@@ -20,7 +20,14 @@ from ezdxf.path import make_path
 
 from .analyzers.dxf import DxfAnalyzer
 from .analyzers.reference_dxf import REFERENCE_APPID
-from .contracts import Discipline, DrawingUnit, ReviewStatus, SourceFile, SourceFormat
+from .contracts import (
+    DetectedElement,
+    Discipline,
+    DrawingUnit,
+    ReviewStatus,
+    SourceFile,
+    SourceFormat,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "reference" / "manifest.json"
@@ -33,15 +40,19 @@ IFC_CLASS_MAP: dict[str, dict[str, str]] = {
         "IfcDoor": "door",
         "IfcWindow": "window",
         "IfcSlab": "slab",
+        "IfcSlabStandardCase": "slab",
         "IfcStair": "stair",
         "IfcStairFlight": "stair",
     },
     "structural": {
         "IfcColumn": "column",
+        "IfcColumnStandardCase": "column",
         "IfcBeam": "beam",
+        "IfcBeamStandardCase": "beam",
         "IfcWall": "shear_wall",
         "IfcWallStandardCase": "shear_wall",
         "IfcSlab": "slab",
+        "IfcSlabStandardCase": "slab",
         "IfcFooting": "foundation",
     },
 }
@@ -75,6 +86,19 @@ METRIC_FIELDS = (
     "waist_thickness_m",
     "volume_m3",
 )
+
+BLIND_GEOMETRY_FIELDS: dict[str, tuple[str, ...]] = {
+    "room": ("area_m2", "perimeter_m"),
+    "wall": ("length_m",),
+    "door": ("count", "width_m"),
+    "window": ("count", "width_m"),
+    "column": ("width_m", "depth_m"),
+    "beam": ("length_m", "width_m"),
+    "shear_wall": ("length_m", "thickness_m"),
+    "slab": ("area_m2", "perimeter_m"),
+    "foundation": ("area_m2", "perimeter_m"),
+    "stair": ("plan_area_m2", "horizontal_run_m"),
+}
 
 
 class ReferenceLabError(RuntimeError):
@@ -220,8 +244,7 @@ def _require_ifc_dependencies():
         from shapely.geometry import Polygon as _Polygon
     except ImportError as exc:
         raise ReferenceLabError(
-            "IFC laboratuvarı için isteğe bağlı bağımlılıkları kurun: "
-            "pip install -e '.[reference]'"
+            "IFC laboratuvarı için isteğe bağlı bağımlılıkları kurun: pip install -e '.[reference]'"
         ) from exc
     _ = _Polygon
     return ifcopenshell
@@ -346,7 +369,11 @@ def _choose_explicit(quantities: list[dict[str, Any]], dimension: int) -> dict[s
     return candidates[0] if candidates else None
 
 
-def _footprint_from_shape(shape) -> tuple[Any, dict[str, float]]:
+def _footprint_from_shape(
+    shape,
+    *,
+    geometry_to_si_scale: float = 1.0,
+) -> tuple[Any, dict[str, float]]:
     import ifcopenshell.util.shape
     import shapely
     from shapely.geometry import Polygon
@@ -357,7 +384,7 @@ def _footprint_from_shape(shape) -> tuple[Any, dict[str, float]]:
     triangles = []
     z_values: list[float] = []
     for face in faces:
-        points = [vertices[int(index)] for index in face]
+        points = [vertices[int(index)] * geometry_to_si_scale for index in face]
         z_values.extend(float(point[2]) for point in points)
         polygon = Polygon([(float(point[0]), float(point[1])) for point in points])
         if polygon.is_valid and polygon.area > 1e-12:
@@ -367,7 +394,9 @@ def _footprint_from_shape(shape) -> tuple[Any, dict[str, float]]:
     footprint = shapely.set_precision(unary_union(triangles), 1e-9).buffer(0)
     if footprint.is_empty:
         raise ReferenceLabError("IFC yatay izdüşümü boş.")
-    volume = abs(float(ifcopenshell.util.shape.get_volume(shape.geometry)))
+    volume = abs(float(ifcopenshell.util.shape.get_volume(shape.geometry))) * (
+        geometry_to_si_scale**3
+    )
     metrics = {
         "area_m2": float(footprint.area),
         "perimeter_m": float(footprint.length),
@@ -381,14 +410,100 @@ def _footprint_from_shape(shape) -> tuple[Any, dict[str, float]]:
         rectangle = footprint.minimum_rotated_rectangle
     coords = list(rectangle.exterior.coords)
     edges = [
-        math.dist(coords[index], coords[index + 1])
-        for index in range(min(4, len(coords) - 1))
+        math.dist(coords[index], coords[index + 1]) for index in range(min(4, len(coords) - 1))
     ]
     positive = [edge for edge in edges if edge > 1e-9]
     if positive:
         metrics["major_m"] = max(positive)
         metrics["minor_m"] = min(positive)
     return footprint, metrics
+
+
+def _geometry_unit_calibration(model, settings) -> dict[str, Any]:
+    """Calibrate geometry output only from explicit IFC element dimensions.
+
+    IfcOpenShell normally emits SI geometry, but some otherwise schema-valid IFC
+    reference files keep SI-prefixed coordinates in project units.  We never
+    guess from the apparent building size: a non-unit scale is accepted only
+    when door/window OverallWidth and OverallHeight anchors agree with the
+    project length unit.
+    """
+
+    import ifcopenshell.util.unit
+
+    project_scale = float(ifcopenshell.util.unit.calculate_unit_scale(model))
+    anchors: list[dict[str, Any]] = []
+    for ifc_class in ("IfcDoor", "IfcWindow"):
+        try:
+            elements = model.by_type(ifc_class)
+        except RuntimeError:
+            continue
+        for element in elements:
+            if not getattr(element, "Representation", None):
+                continue
+            try:
+                shape = ifcopenshell.geom.create_shape(settings, element)
+                _, metrics = _footprint_from_shape(shape)
+            except Exception:
+                continue
+            for attribute, metric in (
+                ("OverallWidth", "major_m"),
+                ("OverallHeight", "height_m"),
+            ):
+                raw_value = getattr(element, attribute, None)
+                geometry_value = float(metrics.get(metric, 0.0))
+                if raw_value is None or float(raw_value) <= 0 or geometry_value <= 0:
+                    continue
+                expected_si = float(raw_value) * project_scale
+                anchors.append(
+                    {
+                        "global_id": str(getattr(element, "GlobalId", "") or ""),
+                        "ifc_class": element.is_a(),
+                        "attribute": attribute,
+                        "expected_si_m": expected_si,
+                        "geometry_value": geometry_value,
+                        "ratio": expected_si / geometry_value,
+                    }
+                )
+
+    tolerance = 0.02
+    project_scale_matches = [
+        anchor
+        for anchor in anchors
+        if project_scale > 0 and abs(float(anchor["ratio"]) / project_scale - 1.0) <= tolerance
+    ]
+    identity_matches = [
+        anchor for anchor in anchors if abs(float(anchor["ratio"]) - 1.0) <= tolerance
+    ]
+    factor = 1.0
+    method = "ifcopenshell_si_default"
+    if (
+        not math.isclose(project_scale, 1.0, rel_tol=0.0, abs_tol=1e-12)
+        and len(project_scale_matches) >= 2
+        and len(project_scale_matches) > len(identity_matches)
+        and len(project_scale_matches) / len(anchors) >= 0.8
+    ):
+        factor = project_scale
+        method = "explicit_door_window_dimensions"
+
+    return {
+        "geometry_to_si_scale": factor,
+        "project_length_to_si_scale": project_scale,
+        "method": method,
+        "anchor_count": len(anchors),
+        "matching_anchor_count": (
+            len(project_scale_matches) if factor != 1.0 else len(identity_matches)
+        ),
+        "anchors": [
+            {
+                **anchor,
+                "expected_si_m": round(float(anchor["expected_si_m"]), 9),
+                "geometry_value": round(float(anchor["geometry_value"]), 9),
+                "ratio": round(float(anchor["ratio"]), 12),
+            }
+            for anchor in anchors[:20]
+        ],
+    }
 
 
 def _polygon_payload(geometry) -> list[dict[str, Any]]:
@@ -398,8 +513,7 @@ def _polygon_payload(geometry) -> list[dict[str, Any]]:
         payload.append(
             {
                 "exterior": [
-                    [round(float(x), 9), round(float(y), 9)]
-                    for x, y in polygon.exterior.coords
+                    [round(float(x), 9), round(float(y), 9)] for x, y in polygon.exterior.coords
                 ],
                 "holes": [
                     [[round(float(x), 9), round(float(y), 9)] for x, y in ring.coords]
@@ -473,7 +587,7 @@ def _measurements(element_type: str, geometry: dict[str, float]) -> dict[str, fl
     elif element_type in {"door", "window"}:
         values = {"count": 1.0, "width_m": major, "height_m": height}
     elif element_type == "column":
-        values = {"width_m": major, "depth_m": minor, "height_m": height, "volume_m3": volume}
+        values = {"width_m": minor, "depth_m": major, "height_m": height, "volume_m3": volume}
     elif element_type == "beam":
         values = {"length_m": major, "width_m": minor, "height_m": height, "volume_m3": volume}
     elif element_type == "shear_wall":
@@ -512,10 +626,17 @@ def extract_ifc_golden(
 
     settings = ifcopenshell.geom.settings()
     settings.set(settings.USE_WORLD_COORDS, True)
+    unit_calibration = _geometry_unit_calibration(model, settings)
+    geometry_to_si_scale = float(unit_calibration["geometry_to_si_scale"])
     class_map = IFC_CLASS_MAP[source["discipline"]]
     candidates: dict[str, Any] = {}
     for ifc_class in class_map:
-        for element in model.by_type(ifc_class):
+        try:
+            typed_elements = model.by_type(ifc_class)
+        except RuntimeError:
+            # StandardCase alt türleri her IFC şemasında bulunmaz.
+            continue
+        for element in typed_elements:
             guid = str(getattr(element, "GlobalId", "") or "")
             if guid:
                 candidates[guid] = element
@@ -549,7 +670,10 @@ def extract_ifc_golden(
         record["storey"], record["storey_guid"] = _element_storey(element)
         try:
             shape = ifcopenshell.geom.create_shape(settings, element)
-            footprint, geometry_metrics = _footprint_from_shape(shape)
+            footprint, geometry_metrics = _footprint_from_shape(
+                shape,
+                geometry_to_si_scale=geometry_to_si_scale,
+            )
             record["geometry"] = _polygon_payload(footprint)
             record["geometry_metrics"] = {
                 key: round(float(value), 9) for key, value in sorted(geometry_metrics.items())
@@ -615,6 +739,7 @@ def extract_ifc_golden(
         "source_commit": dataset["commit"],
         "license": dataset["license"],
         "attribution": dataset["attribution"],
+        "geometry_unit_calibration": unit_calibration,
         "elements": records,
     }
 
@@ -820,11 +945,145 @@ def _write_dxf(
         "storey": sheet_name,
         "reference_guids": sorted(record["global_id"] for record in records),
         "expected": (
-            "needs_review"
-            if variant in {"hard_unitless", "hard_wrong_unit"}
-            else "quantities"
+            "needs_review" if variant in {"hard_unitless", "hard_wrong_unit"} else "quantities"
         ),
         "mutations": mutations,
+    }
+
+
+def _blind_ring(
+    ring: list[list[float]],
+    origin: tuple[float, float],
+) -> list[tuple[float, float]]:
+    return [
+        ((point[0] - origin[0]) * 1000.0, (point[1] - origin[1]) * 1000.0) for point in ring[:-1]
+    ]
+
+
+def _ring_area(ring: list[list[float]]) -> float:
+    return abs(
+        sum(
+            first[0] * second[1] - second[0] * first[1]
+            for first, second in zip(ring, ring[1:], strict=False)
+        )
+        / 2.0
+    )
+
+
+def _write_blind_dxf(
+    records: list[dict[str, Any]],
+    output: Path,
+    source: dict[str, Any],
+    *,
+    sheet_name: str,
+) -> dict[str, Any]:
+    """Write ordinary discipline layers without IFC identity or quantity metadata."""
+    fixed_metadata = ezdxf.options.write_fixed_meta_data_for_testing
+    ezdxf.options.write_fixed_meta_data_for_testing = True
+    document = ezdxf.new("R2018", setup=True)
+    document.header["$INSUNITS"] = 4
+    for layer in sorted(set(LAYER_MAP.values())):
+        if layer not in document.layers:
+            document.layers.add(layer)
+    modelspace = document.modelspace()
+    bounds = [
+        point
+        for record in records
+        for polygon in record["geometry"]
+        for point in polygon["exterior"]
+    ]
+    origin = (
+        min(point[0] for point in bounds) if bounds else 0.0,
+        min(point[1] for point in bounds) if bounds else 0.0,
+    )
+    if source["discipline"] == "architectural":
+        modelspace.add_text(
+            "ZEMIN KAT PLANI",
+            dxfattribs={"layer": "0", "height": 250},
+        ).set_placement((0, -1000))
+    for index, record in enumerate(records):
+        layer = LAYER_MAP[(source["discipline"], record["type"])]
+        polygons = record["geometry"]
+        all_points = [point for polygon in polygons for point in polygon["exterior"]]
+        if not all_points:
+            continue
+        min_x = min(point[0] for point in all_points)
+        min_y = min(point[1] for point in all_points)
+        max_x = max(point[0] for point in all_points)
+        max_y = max(point[1] for point in all_points)
+        center = ((min_x + max_x) / 2.0, (min_y + max_y) / 2.0)
+        if record["type"] in {"door", "window"}:
+            prefix = "DOOR" if record["type"] == "door" else "WINDOW"
+            block_name = f"{prefix}_BLIND_{index + 1}"
+            block = document.blocks.new(block_name)
+            local_origin = center
+            for polygon in polygons:
+                exterior = _blind_ring(polygon["exterior"], local_origin)
+                if len(exterior) >= 3:
+                    block.add_lwpolyline(exterior, close=True, dxfattribs={"layer": "0"})
+            insert = ((center[0] - origin[0]) * 1000.0, (center[1] - origin[1]) * 1000.0)
+            modelspace.add_blockref(block_name, insert, dxfattribs={"layer": layer})
+            continue
+        if source["discipline"] == "architectural" and record["type"] == "wall":
+            block_name = f"WALL_BLIND_{index + 1}"
+            block = document.blocks.new(block_name)
+            for polygon in polygons:
+                exterior = _blind_ring(polygon["exterior"], center)
+                if len(exterior) >= 3:
+                    block.add_lwpolyline(exterior, close=True, dxfattribs={"layer": "0"})
+            insert = ((center[0] - origin[0]) * 1000.0, (center[1] - origin[1]) * 1000.0)
+            modelspace.add_blockref(block_name, insert, dxfattribs={"layer": layer})
+            continue
+        if record["type"] in {"room", "slab", "foundation", "stair"}:
+            hatch = modelspace.add_hatch(dxfattribs={"layer": layer})
+            for polygon in polygons:
+                exterior = _blind_ring(polygon["exterior"], origin)
+                if len(exterior) >= 3:
+                    hatch.paths.add_polyline_path(exterior, is_closed=True, flags=1)
+                for hole in polygon["holes"]:
+                    ring = _blind_ring(hole, origin)
+                    if len(ring) >= 3:
+                        hatch.paths.add_polyline_path(ring, is_closed=True, flags=0)
+            if record["type"] == "room":
+                modelspace.add_text(
+                    f"R{index + 1}",
+                    dxfattribs={"layer": "A-ROOM", "height": 200},
+                ).set_placement(
+                    ((center[0] - origin[0]) * 1000.0, (center[1] - origin[1]) * 1000.0)
+                )
+            continue
+        for polygon in sorted(
+            polygons,
+            key=lambda item: -_ring_area(item["exterior"]),
+        ):
+            exterior = _blind_ring(polygon["exterior"], origin)
+            if len(exterior) >= 3:
+                modelspace.add_lwpolyline(
+                    exterior,
+                    close=True,
+                    dxfattribs={"layer": layer},
+                )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        document.saveas(output)
+    finally:
+        ezdxf.options.write_fixed_meta_data_for_testing = fixed_metadata
+    return {
+        "path": str(output),
+        "filename": output.name,
+        "sha256": sha256_file(output),
+        "variant": "blind_clean",
+        "source_id": source["id"],
+        "discipline": source["discipline"],
+        "storey": sheet_name,
+        "reference_guids": sorted(record["global_id"] for record in records),
+        "expected": "detected_planar_quantities",
+        "mutations": [
+            {
+                "id": "ifc_identity_and_quantity_metadata_removed",
+                "expected": "normal_dxf_detector_matches_planar_golden_totals",
+            }
+        ],
     }
 
 
@@ -952,6 +1211,22 @@ def build_references(
                         )
                     )
                     outputs.append(output)
+                blind_output = (
+                    root
+                    / "generated"
+                    / dataset["id"]
+                    / "dxf"
+                    / _dxf_filename(source, sheet_name, "blind_clean")
+                )
+                dxf_files.append(
+                    _write_blind_dxf(
+                        records,
+                        blind_output,
+                        source,
+                        sheet_name=sheet_name,
+                    )
+                )
+                outputs.append(blind_output)
         totals = root / "generated" / dataset["id"] / "golden" / "totals.csv"
         _write_totals_csv(totals, golden_sources)
         outputs.append(totals)
@@ -1081,11 +1356,87 @@ def _geometry_fields(element_type: str) -> tuple[str, ...]:
     return ("major_m", "minor_m")
 
 
+def _compare_blind_file(
+    file_record: dict[str, Any],
+    golden_by_guid: dict[str, dict[str, Any]],
+    tolerance: float,
+) -> dict[str, Any]:
+    path = Path(file_record["path"])
+    source = _source_for_dxf(file_record, path)
+    elements, warnings, _ = DxfAnalyzer().analyze(source, path)
+    expected_records = [golden_by_guid[guid] for guid in file_record["reference_guids"]]
+    expected_by_type: dict[str, list[dict[str, Any]]] = {}
+    for record in expected_records:
+        expected_by_type.setdefault(record["type"], []).append(record)
+    actual_by_type: dict[str, list[DetectedElement]] = {}
+    for element in elements:
+        if element.element_type in BLIND_GEOMETRY_FIELDS:
+            actual_by_type.setdefault(element.element_type, []).append(element)
+
+    count_differences: list[dict[str, Any]] = []
+    measurement_differences: list[dict[str, Any]] = []
+    for element_type in sorted(set(expected_by_type) | set(actual_by_type)):
+        expected_items = expected_by_type.get(element_type, [])
+        actual_items = actual_by_type.get(element_type, [])
+        if len(expected_items) != len(actual_items):
+            count_differences.append(
+                {
+                    "type": element_type,
+                    "expected": len(expected_items),
+                    "actual": len(actual_items),
+                }
+            )
+        for field in BLIND_GEOMETRY_FIELDS.get(element_type, ()):
+            expected_values = [
+                float(record["measurements"][field])
+                for record in expected_items
+                if float(record["measurements"].get(field, 0.0)) > 0
+            ]
+            if not expected_values:
+                continue
+            actual_values = [
+                float(element.measurements[field])
+                for element in actual_items
+                if float(element.measurements.get(field, 0.0)) > 0
+            ]
+            expected_total = sum(expected_values)
+            actual_total = sum(actual_values)
+            ratio = abs(actual_total - expected_total) / max(abs(expected_total), 1e-9)
+            if len(actual_values) != len(actual_items) or ratio > tolerance:
+                measurement_differences.append(
+                    {
+                        "type": element_type,
+                        "field": field,
+                        "expected_total": expected_total,
+                        "actual_total": actual_total,
+                        "expected_value_count": len(expected_values),
+                        "actual_value_count": len(actual_values),
+                        "difference_ratio": ratio,
+                    }
+                )
+    passed = not count_differences and not measurement_differences
+    return {
+        "file": path.name,
+        "variant": file_record["variant"],
+        "expected_count": len(expected_records),
+        "detected_count": sum(len(items) for items in actual_by_type.values()),
+        "missing": [],
+        "extra": [],
+        "wrong_type": count_differences,
+        "measurement_differences": measurement_differences,
+        "geometry_differences": [],
+        "warning_codes": sorted({warning.code for warning in warnings}),
+        "passed": passed,
+    }
+
+
 def _compare_file(
     file_record: dict[str, Any],
     golden_by_guid: dict[str, dict[str, Any]],
     tolerance: float,
 ) -> dict[str, Any]:
+    if file_record["variant"] == "blind_clean":
+        return _compare_blind_file(file_record, golden_by_guid, tolerance)
     path = Path(file_record["path"])
     source = _source_for_dxf(file_record, path)
     elements, warnings, _ = DxfAnalyzer().analyze(source, path)
@@ -1248,7 +1599,11 @@ def validate_references(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="MetrajAI IFC/DXF doğrulama laboratuvarı")
     parser.add_argument("command", choices=("fetch", "build", "validate", "all"))
-    parser.add_argument("--dataset", choices=("pcert", "duplex", "all"), default="all")
+    parser.add_argument(
+        "--dataset",
+        default="all",
+        help="Manifestteki veri seti kimliği veya tüm kapılar için 'all'",
+    )
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--data-root", type=Path)
     return parser

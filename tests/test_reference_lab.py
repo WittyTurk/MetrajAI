@@ -18,11 +18,19 @@ from metrajai.reference_lab import (
     validate_references,
 )
 
+REJECTED_MANIFEST = DEFAULT_MANIFEST.with_name("rejected.json")
+
 
 def test_reference_manifest_pins_license_attribution_commit_and_checksum() -> None:
     manifest = load_manifest(DEFAULT_MANIFEST)
 
-    assert [dataset["id"] for dataset in manifest["datasets"]] == ["pcert", "duplex"]
+    assert [dataset["id"] for dataset in manifest["datasets"]] == [
+        "pcert",
+        "pcert43",
+        "ifc4-official-components",
+        "ifc4-community-components",
+        "duplex",
+    ]
     for dataset in manifest["datasets"]:
         assert dataset["license"] == "CC-BY-4.0"
         assert dataset["attribution"]
@@ -32,6 +40,25 @@ def test_reference_manifest_pins_license_attribution_commit_and_checksum() -> No
             assert dataset["commit"] in source["url"]
             assert len(source["sha256"]) == 64
             assert source["size_bytes"] > 0
+
+
+def test_rejected_reference_candidates_keep_auditable_reason_and_checksum() -> None:
+    rejected = json.loads(REJECTED_MANIFEST.read_text(encoding="utf-8"))
+
+    assert rejected["schema_version"] == 1
+    assert {item["id"] for item in rejected["candidates"]} == {
+        "medical-dental-clinic",
+        "esplanades",
+        "smartlivingepc-taltech",
+        "schependomlaan",
+    }
+    for candidate in rejected["candidates"]:
+        assert candidate["status"] == "rejected"
+        assert candidate["reason"]
+        assert candidate["source_page"].startswith("https://")
+        for source in candidate["sources"]:
+            assert len(source["sha256"]) == 64
+            assert source["error_count"] > 0
 
 
 def test_fetch_reuses_verified_copy_and_blocks_checksum_mismatch(tmp_path: Path) -> None:
@@ -108,9 +135,7 @@ def test_reference_dxf_preserves_global_id_and_deduplicates_hard_copy(tmp_path: 
     path = tmp_path / "reference.dxf"
     _write_reference_fixture(path, insunits=4)
 
-    elements, warnings, unit = DxfAnalyzer().analyze(
-        _reference_source(path, confirmed=True), path
-    )
+    elements, warnings, unit = DxfAnalyzer().analyze(_reference_source(path, confirmed=True), path)
 
     assert unit == DrawingUnit.MM
     assert len(elements) == 1
@@ -124,31 +149,51 @@ def test_reference_dxf_without_units_is_blocked_for_review(tmp_path: Path) -> No
     path = tmp_path / "unitless-reference.dxf"
     _write_reference_fixture(path, insunits=0)
 
-    elements, warnings, unit = DxfAnalyzer().analyze(
-        _reference_source(path, confirmed=False), path
-    )
+    elements, warnings, unit = DxfAnalyzer().analyze(_reference_source(path, confirmed=False), path)
 
     assert unit == DrawingUnit.UNKNOWN
     assert elements
     assert all(element.review_status == ReviewStatus.NEEDS_REVIEW for element in elements)
     assert all("unit_confirmation_required" in element.issues for element in elements)
-    assert any(
-        warning.code == "REFERENCE_DXF_UNIT_CONFIRMATION_REQUIRED" for warning in warnings
-    )
+    assert any(warning.code == "REFERENCE_DXF_UNIT_CONFIRMATION_REQUIRED" for warning in warnings)
 
 
 def test_real_reference_gate_runs_only_when_reference_data_is_present() -> None:
     root = DEFAULT_MANIFEST.parent.parent / "reference-data"
-    pcert_manifest = root / "generated" / "pcert" / "generated-manifest.json"
-    if not pcert_manifest.exists():
-        pytest.skip("isteğe bağlı referans verisi indirilmedi")
     manifest = load_manifest(DEFAULT_MANIFEST)
+    generated_manifests = [
+        root / "generated" / dataset["id"] / "generated-manifest.json"
+        for dataset in manifest["datasets"]
+    ]
+    if not all(path.exists() for path in generated_manifests):
+        pytest.skip("isteğe bağlı referans verisi indirilmedi")
 
-    reports = validate_references(manifest, selected="pcert", data_root=root)
+    reports = validate_references(manifest, selected="all", data_root=root)
 
-    assert reports[0]["dataset_id"] == "pcert"
-    assert reports[0]["passed"] is True
-    persisted = json.loads(
-        (root / "generated" / "pcert" / "validation.json").read_text(encoding="utf-8")
+    assert [report["dataset_id"] for report in reports] == [
+        dataset["id"] for dataset in manifest["datasets"]
+    ]
+    assert all(report["passed"] for report in reports)
+
+    blind_path = next(
+        path
+        for path in (root / "generated" / "ifc4-official-components" / "dxf").glob(
+            "*__blind_clean.dxf"
+        )
+        if "wall-opening-window" in path.name
     )
-    assert persisted["passed"] is True
+    blind_document = ezdxf.readfile(blind_path)
+    assert REFERENCE_APPID not in blind_document.appids
+    assert all(not entity.has_xdata(REFERENCE_APPID) for entity in blind_document.modelspace())
+
+    calibration = json.loads(
+        (
+            root
+            / "generated"
+            / "ifc4-official-components"
+            / "golden"
+            / "ifc4-wall-opening-window.json"
+        ).read_text(encoding="utf-8")
+    )["geometry_unit_calibration"]
+    assert calibration["method"] == "explicit_door_window_dimensions"
+    assert calibration["geometry_to_si_scale"] == pytest.approx(0.001)

@@ -114,22 +114,37 @@ doğrulamasında, açık lisanslı kaynaktan kontrollü DXF ve eleman bazlı alt
 
 ```bash
 .venv/bin/python -m pip install -e '.[reference]'
-.venv/bin/python scripts/reference_dataset.py fetch --dataset pcert
-.venv/bin/python scripts/reference_dataset.py build --dataset pcert
-.venv/bin/python scripts/reference_dataset.py validate --dataset pcert
+.venv/bin/python scripts/reference_dataset.py fetch --dataset all
+.venv/bin/python scripts/reference_dataset.py build --dataset all
+.venv/bin/python scripts/reference_dataset.py validate --dataset all
 ```
 
-Komutlar `pcert`, `duplex` veya `all` veri setini kabul eder. Sabit commit, URL,
-SHA-256, CC BY 4.0 lisansı ve atıf bilgisi `reference/manifest.json` içindedir.
+Komutlar `pcert`, `pcert43`, `ifc4-official-components`,
+`ifc4-community-components`, `duplex` veya `all` veri setini kabul eder. Sabit
+commit, URL, SHA-256, CC BY 4.0 lisansı ve atıf bilgisi
+`reference/manifest.json` içindedir.
 Kaynak IFC'ler önce şema ve EXPRESS doğrulamasından geçer; doğrulama hatası, checksum
 farkı veya zorunlu geometri üretim hatası kapıyı durdurur. Temiz DXF'lere ek olarak
 kopya/döndürme/aynalama, iç içe blok, açık polyline, bulge, boşluklu hatch, uzak
 geometri ve yanlış/eksik birim içeren kontrollü zor dosyalar oluşturulur.
 
+Her pafta ayrıca IFC GlobalId ve miktar XDATA'sı bulunmayan `blind_clean` çeşidinde
+üretilir. Bu dosya normal DXF algılayıcısından geçer; eleman adetleri ve iki boyutlu
+miktarlar IFC altın toplamlarıyla karşılaştırılır. Böylece kimlik bilgisini taşıma
+testi ile çizimi gerçekten okuma testi birbirinden ayrılır. IFC geometri birimi,
+yalnız açık kapı/pencere ölçü kanıtları uyuşuyorsa kalibre edilir; bina boyutuna
+bakarak sessiz ölçek tahmini yapılmaz.
+
 PCERT küçük resmî model kapısıdır. İkinci kapı; dört katlı, mimari elemanlarla birlikte
 `LoadBearing` kanıtlı duvar/döşeme, kiriş ve temel içeren buildingSMART Duplex
 Apartment modelidir. Birleşik IFC'den mimari ve statik altın setler ayrı üretilir;
 taşıyıcı niteliği olmayan duvar ve döşemeler statik setine alınmaz.
+
+Medical–Dental Clinic, Esplanades ve SmartLivingEPC TalTech açık lisanslı olsa da
+şema/EXPRESS kapısını geçmediği için; Schependomlaan ise kullanım lisansı nedeniyle
+altın setten çıkarılmıştır. Kontrol edilen SHA-256 değerleri, hata sayıları ve ret
+nedenleri `reference/rejected.json` içinde tutulur. İnternette yayımlanmış olmak ya
+da dosyanın açılabilmesi, doğruluk kanıtı sayılmaz.
 
 ### macOS masaüstü penceresi
 
@@ -181,10 +196,12 @@ eleman ve manuel kontrol toplamları sağlandığında özel test alanında olu�
 
 ## Durum
 
-1.2 macOS pilotu, mimari/statik motoru kullanıcı paftalarından bağımsız ölçen açık
+1.3 macOS pilotu, mimari/statik motoru kullanıcı paftalarından bağımsız ölçen açık
 kaynak doğrulama laboratuvarını içerir. Şema ve EXPRESS doğrulaması temiz olan PCERT
-ile Duplex modellerinden üretilen temiz ve kontrollü zor DXF'ler GlobalId düzeyinde
-karşılaştırılır. IFC ve türetilmiş dosyalar uygulama paketine veya Git deposuna girmez.
+IFC4/IFC4.3, resmî IFC4 bileşenleri ve Duplex modelinden üretilen temiz, kör ve
+kontrollü zor DXF'ler karşılaştırılır. Kör dosyalar IFC kimliği taşımadığı için normal
+DXF algılama yolunu sınar. IFC ve türetilmiş dosyalar uygulama paketine veya Git
+deposuna girmez.
 
 Taziye Evi'nde gerçek kat planı bağlamı kopya/görünüş/detay bölgelerinden ayrılır;
 "açılımlı pencere" açıklaması artık detay başlığı sayılmaz. DXF başlığındaki `mm` ile

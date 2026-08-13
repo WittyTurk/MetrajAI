@@ -77,7 +77,7 @@ RULES: dict[Discipline, tuple[DetectionRule, ...]] = {
         ),
         DetectionRule(
             "shear_wall",
-            ("PERDE", "SHEAR"),
+            ("PERDE", "SHEAR", "S-WALL"),
             ("LWPOLYLINE",),
             ("length_m", "thickness_m", "height_m"),
             "shear_wall",
@@ -130,6 +130,20 @@ RULES: dict[Discipline, tuple[DetectionRule, ...]] = {
             ("LWPOLYLINE", "HATCH"),
             ("area_m2", "perimeter_m"),
             "room",
+        ),
+        DetectionRule(
+            "slab",
+            ("DOSEME", "SLAB"),
+            ("LWPOLYLINE", "HATCH"),
+            ("area_m2", "thickness_m"),
+            "slab",
+        ),
+        DetectionRule(
+            "stair",
+            ("MERDIVEN", "STAIR"),
+            ("LWPOLYLINE", "HATCH"),
+            ("plan_area_m2", "horizontal_run_m", "total_rise_m", "waist_thickness_m"),
+            "stair",
         ),
         DetectionRule(
             "finish_area",

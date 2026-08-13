@@ -111,6 +111,38 @@ def test_nested_rotated_plan_room_and_opening_schedule_are_traceable(tmp_path: P
     assert len([item for item in elements if item.element_type == "room"]) == 1
 
 
+def test_collinear_wall_footprints_are_joined_across_reviewable_opening(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "wall-with-opening.dxf"
+    document = ezdxf.new("R2018")
+    document.header["$INSUNITS"] = 4
+    modelspace = document.modelspace()
+    modelspace.add_text("ZEMİN KAT PLANI")
+    wall = document.blocks.new("WALL_WITH_OPENING")
+    wall.add_lwpolyline(
+        [(0, 0), (2000, 0), (2000, 200), (0, 200)],
+        close=True,
+        dxfattribs={"layer": "A-WALL"},
+    )
+    wall.add_lwpolyline(
+        [(2900, 0), (5000, 0), (5000, 200), (2900, 200)],
+        close=True,
+        dxfattribs={"layer": "A-WALL"},
+    )
+    modelspace.add_blockref("WALL_WITH_OPENING", (0, 0), dxfattribs={"layer": "A-WALL"})
+    document.saveas(path)
+
+    elements, _, _ = DxfAnalyzer().analyze(source(path), path)
+
+    walls = [item for item in elements if item.element_type == "wall"]
+    assert len(walls) == 1
+    assert walls[0].measurements["length_m"] == pytest.approx(5.0)
+    assert walls[0].measurements["thickness_m"] == pytest.approx(0.2)
+    assert walls[0].measurements["opening_gap_width_m"] == pytest.approx(0.9)
+    assert "blocking:opening_dimensions_required" in walls[0].issues
+
+
 def test_finish_bands_deduct_every_verified_opening_from_room_face() -> None:
     source_file = SourceFile(
         project_id="p",
@@ -199,9 +231,7 @@ def test_written_room_area_blocks_wrong_dxf_unit_instead_of_silent_scaling(
         item for item in warnings if item.code == "ARCHITECTURAL_UNIT_EVIDENCE_MISMATCH"
     )
     assert "cm olarak doğrulanması" in mismatch.message
-    assert all(
-        "blocking:drawing_unit_evidence_mismatch" in item.issues for item in elements
-    )
+    assert all("blocking:drawing_unit_evidence_mismatch" in item.issues for item in elements)
 
 
 def test_openable_window_description_is_not_mistaken_for_detail_title(
