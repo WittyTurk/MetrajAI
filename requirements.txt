@@ -1,0 +1,5 @@
+# Prefer `python -m pip install -e '.[dev]'` for development.
+ezdxf>=1.4,<2
+fastapi>=0.115,<1
+pydantic>=2.10,<3
+uvicorn>=0.34,<1

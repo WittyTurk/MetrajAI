@@ -1,0 +1,148 @@
+# -*- coding: utf-8 -*-
+
+from collections import defaultdict
+
+
+# -------------------------------------------------
+
+    def cluster(self, values):
+
+        values = sorted(values)
+
+        if not values:
+            return []
+
+        groups = []
+
+        current = [values[0]]
+
+        for value in values[1:]:
+
+            if abs(value - current[-1]) <= self.TOLERANCE:
+                current.append(value)
+
+            else:
+                groups.append(current)
+                current = [value]
+
+        groups.append(current)
+
+        result = []
+
+        for group in groups:
+            result.append(sum(group) / len(group))
+
+        return result
+
+    # -------------------------------------------------
+
+    def detect(self):
+
+        x_axes = self.detect_vertical_axes()
+        y_axes = self.detect_horizontal_axes()
+
+        print()
+        print("=" * 40)
+        print("AXIS DETECTOR")
+        print("=" * 40)
+
+        print("XX Axis Count :", len(x_axes))
+        print("YY Axis Count :", len(y_axes))
+
+        print()
+        print("XX POSITIONS")
+
+        for x in x_axes:
+            print(round(x, 1))
+
+        print()
+        print("YY POSITIONS")
+
+        for y in y_axes:
+            print(round(y, 1))
+
+    # -------------------------------------------------
+
+    def detect_vertical_axes(self):
+
+        
+        print()
+        print("FIRST 50 VERTICAL WALLS")
+
+        count = 0
+
+        for wall in self.project.walls:
+
+            if wall.is_vertical:
+
+                print(
+                    wall.id,
+                    "x=",
+                    round(wall.midpoint.x,1),
+                    "len=",
+                    round(wall.length,1)
+                )
+
+                count += 1
+
+                if count == 50:
+                    break
+        values = []
+
+        for wall in self.project.walls:
+
+            if wall.is_vertical:
+                if wall.length < 200:
+                    continue
+                values.append(wall.midpoint.x)
+
+        print("Vertical walls used :", len(values))
+
+        return self.cluster(values)
+    # -------------------------------------------------
+
+    def detect_horizontal_axes(self):
+
+        values = []
+
+        for wall in self.project.walls:
+
+            if wall.is_horizontal:
+                if wall.length < 200:
+                    continue
+                values.append(wall.midpoint.y)
+
+        print("Horizontal walls used :", len(values))
+
+        return self.cluster(values)
+
+    # -------------------------------------------------
+
+    def cluster(self, values):
+
+        values = sorted(values)
+
+        if not values:
+            return []
+
+        groups = []
+
+        current = [values[0]]
+
+        for value in values[1:]:
+
+            if abs(value - current[-1]) <= self.TOLERANCE:
+                current.append(value)
+
+            else:
+                groups.append(current)
+                current = [value]
+
+        groups.append(current)
+
+        result = []
+
+        for group in groups:
+            result.append(sum(group) / len(group))
+
+        return result

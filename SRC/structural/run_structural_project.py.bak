@@ -1,0 +1,228 @@
+# -*- coding: utf-8 -*-
+"""
+Taziye / çok katlı statik metraj.
+Zemin: kolon, kiriş, döşeme demiri
+TEMEL: radye alan + radye/bağ demiri (bir kez)
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import ezdxf
+
+from SRC.structural.project_schema import load_structural_project, FloorSpec
+from SRC.structural.axis_based_structural import AxisBasedStructural
+from SRC.structural.axis_layout_from_dxf import AxisLayoutFromDxf
+from SRC.structural.shear_wall_extractor import ShearWallExtractor
+from SRC.structural.raft_extractor import RaftExtractor
+from SRC.structural.slab_extractor import SlabExtractor
+from SRC.structural.rebar_from_grid import RebarFromGrid
+from SRC.structural.raft_rebar import RaftGeometry, RaftRebarSpec, RaftRebarCalculator
+from SRC.structural.models import RebarItem, Raft
+from SRC.structural.quantity_calculator import QuantityCalculator
+from SRC.structural.excel_export import export_to_excel
+
+
+def process_floor(spec: FloorSpec, project_unit_to_m: float):
+    print()
+    print("#" * 60)
+    print(f"# KAT: {spec.name}  kind={spec.kind}  H={spec.column_height_m} m")
+    print(f"# DXF: {spec.dxf}")
+    print("#" * 60)
+
+    path = Path(spec.dxf)
+    if not path.exists():
+        print(f"UYARI: DXF yok: {path}")
+        return [], [], [], [], [], []
+
+    doc = ezdxf.readfile(str(path))
+    unit_to_m = spec.unit_to_m if spec.unit else project_unit_to_m
+
+    layout = AxisLayoutFromDxf(
+        doc, unit_to_m=unit_to_m, source_path=str(path),
+    ).build()
+    grid = layout.grid
+
+    abs_ = AxisBasedStructural(
+        doc,
+        height_cm=spec.height_cm if spec.kind != "foundation" else max(spec.height_cm, 1.0),
+        floor=spec.name,
+        unit_to_m_hint=unit_to_m,
+        beam_mode=spec.beam_mode,
+    )
+    columns, beams, grid2 = abs_.build()
+    if grid is None or len(getattr(grid, "x_labels", [])) < 2:
+        grid = grid2
+
+    if spec.kind == "foundation":
+        for c in columns:
+            c.height_cm = 0.0
+
+    shear_walls = []
+    if spec.kind != "foundation":
+        try:
+            shear_walls = ShearWallExtractor(
+                doc, default_height_cm=spec.height_cm,
+                unit_to_m=unit_to_m, floor=spec.name,
+            ).extract()
+        except Exception as e:
+            print(f"Perde uyarı: {e}")
+
+    slabs = []
+    if spec.include_slab and spec.kind != "foundation":
+        try:
+            slabs = SlabExtractor(doc, unit_to_m=unit_to_m, floor=spec.name).extract()
+        except Exception as e:
+            print(f"Döşeme uyarı: {e}")
+
+    rafts = []
+    try:
+        rafts = RaftExtractor(doc, unit_to_m=unit_to_m).extract()
+        for r in rafts:
+            r.floor = "TEMEL"
+    except Exception as e:
+        print(f"Radye DXF uyarı: {e}")
+
+    if not rafts and grid is not None and len(grid.x_labels) >= 2:
+        geom = RaftGeometry.from_grid(grid)
+        thickness_m = 0.40
+        rafts = [Raft(
+            id=1,
+            area_m2=geom.area_m2,
+            thickness_cm=thickness_m * 100,
+            perimeter_m=2 * (geom.length_x_m + geom.length_y_m),
+            floor="TEMEL",
+        )]
+        print()
+        print("=" * 55)
+        print("RADYE (grid alan)")
+        print("=" * 55)
+        print(f"  {geom.length_x_m:.2f} × {geom.length_y_m:.2f} m = {geom.area_m2:.2f} m²")
+        print(f"  kalınlık {thickness_m*100:.0f} cm → beton {geom.area_m2*thickness_m:.2f} m³")
+
+    rebars = []
+    if grid is not None and (len(grid.x_labels) >= 2 or len(grid.y_labels) >= 2):
+        try:
+            if spec.kind == "foundation":
+                rebars.extend(_build_foundation_rebar(grid, columns, beams, layout))
+            else:
+                schedule = RebarFromGrid(
+                    grid=grid,
+                    columns=columns,
+                    beams=beams,
+                    shear_walls=shear_walls,
+                    floor=spec.name,
+                    col_height_cm=spec.height_cm,
+                    has_parapet=spec.include_parapet,
+                    include_raft=False,
+                    include_tie=False,
+                    include_ground_slab=True,
+                    include_columns=True,
+                    include_walls=True,
+                    include_beams=True,
+                    include_floor_slab=spec.include_slab,
+                ).build()
+                floor_items = _to_items(schedule, spec.name)
+                floor_items = [
+                    it for it in floor_items
+                    if it.element_type not in ("radye", "bag_kiris")
+                ]
+                rebars.extend(floor_items)
+                rebars.extend(_build_foundation_rebar(grid, columns, beams, layout))
+        except Exception as e:
+            print(f"Demir uyarı: {e}")
+
+    if spec.kind == "foundation":
+        return [], [], [], rafts, [], rebars
+    return columns, beams, shear_walls, rafts, slabs, rebars
+
+
+def _build_foundation_rebar(grid, columns, beams, layout) -> list:
+    items = []
+    try:
+        n_col = len(columns) if columns else len(grid.x_labels) * len(grid.y_labels)
+        secs = [c.section for c in columns] if columns else [(60.0, 40.0)]
+        geom = RaftGeometry.from_grid(grid)
+        calc = RaftRebarCalculator(
+            geom, RaftRebarSpec(), grid=grid, n_columns=n_col,
+            column_sections=secs, floor="TEMEL",
+        )
+        items.extend(_to_items(calc.build(), "TEMEL"))
+    except Exception as e:
+        print(f"Temel demir uyarı: {e}")
+        try:
+            schedule = RebarFromGrid(
+                grid=grid, columns=[], beams=[], floor="TEMEL",
+                include_raft=True, include_tie=True,
+                include_ground_slab=False, include_columns=False,
+                include_walls=False, include_beams=False, include_floor_slab=False,
+            ).build()
+            items.extend(_to_items(schedule, "TEMEL"))
+        except Exception as e2:
+            print(f"Temel demir fallback uyarı: {e2}")
+    return items
+
+
+def _to_items(schedule, floor: str) -> list:
+    out = []
+    for ln in schedule.lines:
+        out.append(RebarItem(
+            id=ln.id,
+            diameter_mm=ln.diameter_mm,
+            length_m=ln.length_m,
+            count=ln.count,
+            element_type=ln.element,
+            element_mark=ln.axis_ref or ln.note,
+            note=ln.note,
+            floor=ln.floor or floor,
+        ))
+    return out
+
+
+def main():
+    args = sys.argv[1:]
+    if not args:
+        print(__doc__)
+        sys.exit(1)
+    excel_path = "statik_metraj.xlsx"
+    project_path = None
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--excel" and i + 1 < len(args):
+            excel_path = args[i + 1]
+            i += 2
+        elif not a.startswith("--"):
+            project_path = a
+            i += 1
+        else:
+            i += 1
+    if not project_path:
+        print("project.json yolu gerekli")
+        sys.exit(1)
+
+    proj = load_structural_project(project_path)
+    all_c, all_b, all_s, all_r, all_sl, all_rb = [], [], [], [], [], []
+    for spec in proj.expanded_floors():
+        c, b, s, r, sl, rb = process_floor(spec, proj.unit_to_m)
+        all_c.extend(c); all_b.extend(b); all_s.extend(s)
+        all_r.extend(r); all_sl.extend(sl); all_rb.extend(rb)
+    for lst in (all_c, all_b, all_s, all_r, all_sl, all_rb):
+        for i, x in enumerate(lst, 1):
+            x.id = i
+
+    result = QuantityCalculator(
+        default_column_height_cm=proj.default_column_height_m * 100
+    ).build(
+        columns=all_c, beams=all_b, shear_walls=all_s,
+        rafts=all_r, slabs=all_sl, rebars=all_rb, project_name=proj.name,
+    )
+    export_to_excel(result, excel_path)
+    print(f"\nExcel: {excel_path}")
+    return result
+
+
+if __name__ == "__main__":
+    main()
