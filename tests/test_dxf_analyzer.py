@@ -247,7 +247,8 @@ def test_architectural_room_boundaries_enter_engineer_review(tmp_path: Path) -> 
     room = next(item for item in elements if item.element_type == "room")
     assert room.measurements["area_m2"] == pytest.approx(20.0)
     assert room.measurements["perimeter_m"] == pytest.approx(18.0)
-    assert room.review_status == ReviewStatus.PENDING
+    assert room.review_status == ReviewStatus.NEEDS_REVIEW
+    assert "blocking:room_code_assignment_required" in room.issues
     assert any(warning.code == "ARCHITECTURAL_ENGINE_REVIEW_MODE" for warning in warnings)
 
 

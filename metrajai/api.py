@@ -8,6 +8,10 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from .analyzers.architectural_plan import (
+    apply_architectural_assignments,
+    reconcile_architectural_elements,
+)
 from .commercial import (
     CatalogImportError,
     calculate_offer,
@@ -17,6 +21,8 @@ from .commercial import (
 from .contracts import (
     AdjustmentBase,
     AdjustmentKind,
+    ArchitecturalAssignment,
+    ArchitecturalAssignmentKind,
     Assumption,
     Discipline,
     DrawingUnit,
@@ -157,6 +163,17 @@ class RepeatAssignmentRequest(BaseModel):
     reason: str = Field(default="", max_length=500)
 
 
+class ArchitecturalAssignmentRequest(BaseModel):
+    source_id: str
+    subject_element_id: str
+    kind: ArchitecturalAssignmentKind
+    target_element_ids: list[str] = Field(default_factory=list, max_length=20)
+    values: dict[str, str | float | bool] = Field(default_factory=dict)
+    approved: bool = False
+    reviewer: str = Field(default="", max_length=100)
+    reason: str = Field(default="", max_length=500)
+
+
 class PriceCatalogImportRequest(BaseModel):
     path: str
     name: str = Field(min_length=1, max_length=160)
@@ -229,7 +246,7 @@ class ProjectRegistry:
 
 def create_app(session_token: str | None = None) -> FastAPI:
     token = session_token or token_urlsafe(32)
-    app = FastAPI(title="MetrajAI Local Engine", version="1.0.2")
+    app = FastAPI(title="MetrajAI Local Engine", version="1.1.0")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
@@ -357,9 +374,11 @@ def create_app(session_token: str | None = None) -> FastAPI:
         request: CalibrationRequest,
     ):
         try:
-            return registry.get(project_id).confirm_source_calibration(
-                source_id, scale=request.scale, points=request.points
-            ).model_dump(mode="json")
+            return (
+                registry.get(project_id)
+                .confirm_source_calibration(source_id, scale=request.scale, points=request.points)
+                .model_dump(mode="json")
+            )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
@@ -517,6 +536,52 @@ def create_app(session_token: str | None = None) -> FastAPI:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    @app.post("/projects/{project_id}/architectural-assignments")
+    def create_architectural_assignment(project_id: str, request: ArchitecturalAssignmentRequest):
+        try:
+            workspace = registry.get(project_id)
+            item = workspace.put_architectural_assignment(
+                ArchitecturalAssignment(project_id=project_id, **request.model_dump())
+            )
+            assignments = workspace.list_architectural_assignments(source_id=item.source_id)
+            elements = apply_architectural_assignments(workspace.list_elements(), assignments)
+            source = workspace.get_source(item.source_id)
+            elements, _ = reconcile_architectural_elements(source, elements)
+            elements = apply_architectural_assignments(elements, assignments)
+            workspace.replace_source_elements(
+                item.source_id,
+                [element for element in elements if element.source_id == item.source_id],
+            )
+            EngineService(workspace).refresh_quantities()
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return item.model_dump(mode="json")
+
+    @app.get("/projects/{project_id}/architectural-assignments")
+    def list_architectural_assignments(
+        project_id: str,
+        source_id: str | None = None,
+        subject_element_id: str | None = None,
+    ):
+        return [
+            item.model_dump(mode="json")
+            for item in registry.get(project_id).list_architectural_assignments(
+                source_id=source_id, subject_element_id=subject_element_id
+            )
+        ]
+
+    @app.delete(
+        "/projects/{project_id}/architectural-assignments/{assignment_id}",
+        status_code=204,
+    )
+    def delete_architectural_assignment(project_id: str, assignment_id: str):
+        try:
+            registry.get(project_id).delete_architectural_assignment(assignment_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     @app.post("/projects/{project_id}/analyses", status_code=202)
     def start_analysis(project_id: str, request: AnalysisRequest):
         run = jobs.start(registry.get(project_id), request.source_ids)
@@ -571,8 +636,7 @@ def create_app(session_token: str | None = None) -> FastAPI:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return [
-            item.model_dump(mode="json")
-            for item in workspace.list_element_evidence(element_id)
+            item.model_dump(mode="json") for item in workspace.list_element_evidence(element_id)
         ]
 
     @app.get("/projects/{project_id}/manual-overrides")
@@ -652,9 +716,7 @@ def create_app(session_token: str | None = None) -> FastAPI:
                 is_official=request.is_official,
                 source_url=request.source_url,
             )
-            catalog.stored_path = workspace.store_catalog_source(
-                request.path, catalog.sha256
-            )
+            catalog.stored_path = workspace.store_catalog_source(request.path, catalog.sha256)
             workspace.put_price_catalog(catalog, items)
         except (FileNotFoundError, CatalogImportError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -666,8 +728,7 @@ def create_app(session_token: str | None = None) -> FastAPI:
     @app.get("/projects/{project_id}/price-catalogs")
     def list_price_catalogs(project_id: str):
         return [
-            item.model_dump(mode="json")
-            for item in registry.get(project_id).list_price_catalogs()
+            item.model_dump(mode="json") for item in registry.get(project_id).list_price_catalogs()
         ]
 
     @app.get("/projects/{project_id}/price-items")
@@ -693,11 +754,7 @@ def create_app(session_token: str | None = None) -> FastAPI:
         }
         suggestions = suggest_price_mappings(
             project_id,
-            [
-                item
-                for item in workspace.list_quantities()
-                if item.id not in approved_quantity_ids
-            ],
+            [item for item in workspace.list_quantities() if item.id not in approved_quantity_ids],
             items,
             minimum_confidence=request.minimum_confidence,
         )
@@ -720,8 +777,7 @@ def create_app(session_token: str | None = None) -> FastAPI:
     @app.get("/projects/{project_id}/price-mappings")
     def list_price_mappings(project_id: str):
         return [
-            item.model_dump(mode="json")
-            for item in registry.get(project_id).list_price_mappings()
+            item.model_dump(mode="json") for item in registry.get(project_id).list_price_mappings()
         ]
 
     @app.post("/projects/{project_id}/offer-scenarios")
@@ -735,9 +791,7 @@ def create_app(session_token: str | None = None) -> FastAPI:
                 exchange_rate=request.exchange_rate,
                 exchange_rate_source=request.exchange_rate_source,
                 exchange_rate_date=request.exchange_rate_date,
-                adjustments=[
-                    OfferAdjustment(**item.model_dump()) for item in request.adjustments
-                ],
+                adjustments=[OfferAdjustment(**item.model_dump()) for item in request.adjustments],
                 approved=request.approved,
                 reviewer=request.reviewer,
             )
@@ -760,8 +814,7 @@ def create_app(session_token: str | None = None) -> FastAPI:
     @app.get("/projects/{project_id}/offer-scenarios")
     def list_offer_scenarios(project_id: str):
         return [
-            item.model_dump(mode="json")
-            for item in registry.get(project_id).list_offer_scenarios()
+            item.model_dump(mode="json") for item in registry.get(project_id).list_offer_scenarios()
         ]
 
     @app.get("/projects/{project_id}/offer-scenarios/{scenario_id}")

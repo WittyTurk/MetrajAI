@@ -76,7 +76,7 @@ def test_schema_migration_creates_recovery_backup(tmp_path: Path) -> None:
     assert migrated.manifest.schema_version == CURRENT_SCHEMA_VERSION
     backups = migrated.list_backups()
     assert len(backups) == 1
-    assert "schema-v1-to-v2" in backups[0]["path"]
+    assert f"schema-v1-to-v{CURRENT_SCHEMA_VERSION}" in backups[0]["path"]
     assert (Path(backups[0]["path"]) / "project.metrajai.sqlite3").is_file()
 
 

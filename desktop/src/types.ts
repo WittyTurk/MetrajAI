@@ -30,6 +30,11 @@ export type CalibrationStatus = "not_required" | "required" | "confirmed";
 export type RepeatScope = "source" | "element" | "template";
 export type MappingStatus = "suggested" | "approved" | "rejected";
 export type ReliabilityState = "experimental" | "needs_review" | "approved" | "reliable";
+export type ArchitecturalAssignmentKind =
+  | "room_boundary"
+  | "opening_host"
+  | "opening_rooms"
+  | "finish_policy";
 
 export interface ProjectSummary {
   project: { project_id: string; name: string; updated_at: string; schema_version: number };
@@ -79,6 +84,18 @@ export interface RepeatAssignment {
   target_floor_ids: string[];
   element_ids: string[];
   template_label: string;
+  approved: boolean;
+  reviewer: string;
+  reason: string;
+}
+
+export interface ArchitecturalAssignment {
+  id: string;
+  source_id: string;
+  subject_element_id: string;
+  kind: ArchitecturalAssignmentKind;
+  target_element_ids: string[];
+  values: Record<string, string | number | boolean>;
   approved: boolean;
   reviewer: string;
   reason: string;

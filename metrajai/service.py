@@ -12,6 +12,10 @@ from .analyzers.architectural_height import (
     evidence_warnings,
     extract_architectural_height_evidence_from_path,
 )
+from .analyzers.architectural_plan import (
+    apply_architectural_assignments,
+    reconcile_architectural_elements,
+)
 from .calculations import calculate_quantities
 from .contracts import (
     AnalysisRun,
@@ -87,10 +91,14 @@ class EngineService:
                     elements, source_warnings, detected_unit = analyze_non_dxf_source(
                         source, self.workspace.source_path(source)
                     )
-                if source.discipline in {
-                    Discipline.STRUCTURAL,
-                    Discipline.ARCHITECTURAL,
-                } and height_evidence:
+                if (
+                    source.discipline
+                    in {
+                        Discipline.STRUCTURAL,
+                        Discipline.ARCHITECTURAL,
+                    }
+                    and height_evidence
+                ):
                     elements, applied_count = apply_architectural_heights(elements, height_evidence)
                     if applied_count:
                         height = height_evidence[0].height_m
@@ -106,6 +114,21 @@ class EngineService:
                                 severity="info",
                             )
                         )
+                if source.discipline == Discipline.ARCHITECTURAL:
+                    context_elements = [
+                        item
+                        for item in self.workspace.list_elements()
+                        if item.source_id != source.id
+                    ] + elements
+                    context_elements = apply_architectural_assignments(
+                        context_elements,
+                        self.workspace.list_architectural_assignments(source_id=source.id),
+                    )
+                    context_elements, assignment_warnings = reconcile_architectural_elements(
+                        source, context_elements
+                    )
+                    elements = [item for item in context_elements if item.source_id == source.id]
+                    source_warnings.extend(assignment_warnings)
                 elements, ownership_warnings = apply_sheet_ownership(
                     elements,
                     source,

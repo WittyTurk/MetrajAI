@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AnalysisRun,
   AnalysisWarning,
+  ArchitecturalAssignment,
+  ArchitecturalAssignmentKind,
   DetectedElement,
   Discipline,
   DrawingUnit,
@@ -184,6 +186,38 @@ export class EngineApi {
   deleteRepeatAssignment(projectId: string, assignmentId: string) {
     return this.request<void>(
       `/projects/${projectId}/repeat-assignments/${assignmentId}`,
+      { method: "DELETE" },
+    );
+  }
+
+  architecturalAssignments(projectId: string) {
+    return this.request<ArchitecturalAssignment[]>(
+      `/projects/${projectId}/architectural-assignments`,
+    );
+  }
+
+  createArchitecturalAssignment(
+    projectId: string,
+    payload: {
+      source_id: string;
+      subject_element_id: string;
+      kind: ArchitecturalAssignmentKind;
+      target_element_ids: string[];
+      values?: Record<string, string | number | boolean>;
+      approved: boolean;
+      reviewer: string;
+      reason: string;
+    },
+  ) {
+    return this.request<ArchitecturalAssignment>(
+      `/projects/${projectId}/architectural-assignments`,
+      { method: "POST", body: JSON.stringify(payload) },
+    );
+  }
+
+  deleteArchitecturalAssignment(projectId: string, assignmentId: string) {
+    return this.request<void>(
+      `/projects/${projectId}/architectural-assignments/${assignmentId}`,
       { method: "DELETE" },
     );
   }

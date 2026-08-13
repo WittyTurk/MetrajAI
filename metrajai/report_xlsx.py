@@ -109,8 +109,12 @@ def _quantity_formula(line, row: int, assumption_rows: dict[str, int], end_row: 
     }:
         return f"=L{row}"
     if key == "wall:1":
-        return f"=L{row}*K{row}"
-    if key in {"room:0", "room:1", "landscape_area:0", "finish_area:0"}:
+        return f"={values['net_area_m2']}"
+    if key == "wall:2":
+        return f"=L{row}*K{row}*M{row}"
+    if key == "finish_area:0":
+        return f"={values['net_area_m2']}"
+    if key in {"room:0", "room:1", "landscape_area:0"}:
         return f"=N{row}"
     if key == "room:2":
         return f"=O{row}"
@@ -131,6 +135,7 @@ def export_openpyxl_report(workspace: ProjectWorkspace, target: Path) -> Path:
     reviews = workspace.list_reviews()
     evidence = workspace.list_element_evidence()
     overrides = workspace.list_manual_overrides()
+    architectural_assignments = workspace.list_architectural_assignments()
     review_by_element = {item.element_id: item for item in reviews}
     evidence_by_element: dict[str, list[Any]] = {}
     for item in evidence:
@@ -152,6 +157,7 @@ def export_openpyxl_report(workspace: ProjectWorkspace, target: Path) -> Path:
         "Birim Fiyatlar",
         "Teklif Senaryosu",
         "Teklif Özeti",
+        "Mimari Kırılım",
     ]
     sheets = {name: workbook.create_sheet(name) for name in names}
 
@@ -269,6 +275,84 @@ def export_openpyxl_report(workspace: ProjectWorkspace, target: Path) -> Path:
         len(element_headers),
     )
     _table(sheets["Elemanlar"], element_headers, element_values)
+
+    assignments_by_subject: dict[str, list[Any]] = {}
+    for item in architectural_assignments:
+        assignments_by_subject.setdefault(item.subject_element_id, []).append(item)
+    architectural_values: list[list[Any]] = []
+    architectural_elements = [
+        item
+        for item in elements
+        if item.discipline.value == "architectural"
+        and item.element_type in {"room", "wall", "door", "window", "finish_area"}
+    ]
+    for row, item in enumerate(architectural_elements, start=5):
+        measurement = item.measurements
+        properties = item.properties
+        gross = measurement.get(
+            "gross_area_m2",
+            measurement.get("opening_area_m2", measurement.get("area_m2")),
+        )
+        opening = measurement.get("opening_area_m2", 0.0)
+        architectural_values.append(
+            [
+                item.id,
+                item.element_type,
+                item.floor,
+                properties.get("room_code", ""),
+                properties.get("room_name", ""),
+                properties.get("surface_type", ""),
+                properties.get("material", properties.get("opening_material", "")),
+                gross,
+                opening,
+                None,
+                "m²" if gross is not None else "adet",
+                properties.get("host_wall_id", ""),
+                "; ".join(str(value) for value in properties.get("adjacent_room_ids", [])),
+                item.source_id,
+                item.source_handle,
+                item.review_status.value,
+                properties.get("calculation_policy", ""),
+                json.dumps(
+                    [
+                        value.model_dump(mode="json")
+                        for value in assignments_by_subject.get(item.id, [])
+                    ],
+                    ensure_ascii=False,
+                ),
+            ]
+        )
+        if gross is not None:
+            architectural_values[-1][9] = f"=MAX(0,H{row}-I{row})"
+    architectural_headers = [
+        "Eleman ID",
+        "Tür",
+        "Kat",
+        "Mahal Kodu",
+        "Mahal Adı",
+        "Yüzey",
+        "Malzeme/Tip",
+        "Brüt Alan",
+        "Açıklık Alanı",
+        "Net Alan",
+        "Birim",
+        "Duvar ID",
+        "Komşu Mahaller",
+        "Kaynak ID",
+        "Handle/Satır",
+        "Onay",
+        "Hesap Politikası",
+        "İlişki Kararları",
+    ]
+    _title(
+        sheets["Mimari Kırılım"],
+        "MİMARİ KIRILIM",
+        "Mahal ve malzeme bazında brüt alan − doğrulanmış açıklık = net alan",
+        len(architectural_headers),
+    )
+    _table(sheets["Mimari Kırılım"], architectural_headers, architectural_values)
+    for row in range(5, 5 + len(architectural_values)):
+        sheets["Mimari Kırılım"].cell(row, 10).fill = PatternFill("solid", fgColor=ACCENT)
 
     assumption_rows: dict[str, int] = {}
     assumption_values = []

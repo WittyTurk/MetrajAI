@@ -12,6 +12,7 @@ from .calculations import derive_element_measurements
 from .contracts import (
     AnalysisRun,
     AnalysisWarning,
+    ArchitecturalAssignment,
     Assumption,
     CalibrationStatus,
     CostLine,
@@ -45,7 +46,7 @@ from .floor_management import infer_floor_kind, infer_sheet_kind, normalize_repe
 
 MANIFEST_NAME = "manifest.json"
 DATABASE_NAME = "project.metrajai.sqlite3"
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 SUPPORTED_SOURCE_FORMATS = {
     SourceFormat.DXF,
     SourceFormat.XLSX,
@@ -265,6 +266,21 @@ class ProjectWorkspace:
                     state TEXT NOT NULL,
                     data TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS architectural_assignments (
+                    id TEXT PRIMARY KEY,
+                    source_id TEXT NOT NULL,
+                    subject_element_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    approved INTEGER NOT NULL,
+                    data TEXT NOT NULL,
+                    FOREIGN KEY(source_id) REFERENCES sources(id) ON DELETE CASCADE,
+                    FOREIGN KEY(subject_element_id) REFERENCES elements(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS architecture_assignments_subject
+                    ON architectural_assignments(subject_element_id);
+                CREATE INDEX IF NOT EXISTS architecture_assignments_source
+                    ON architectural_assignments(source_id);
                 """
             )
             current = connection.execute(
@@ -595,9 +611,7 @@ class ProjectWorkspace:
             )
         return assignment
 
-    def list_repeat_assignments(
-        self, source_id: str | None = None
-    ) -> list[RepeatAssignment]:
+    def list_repeat_assignments(self, source_id: str | None = None) -> list[RepeatAssignment]:
         query = "SELECT data FROM repeat_assignments"
         params: tuple[str, ...] = ()
         if source_id:
@@ -615,6 +629,80 @@ class ProjectWorkspace:
             )
         if cursor.rowcount == 0:
             raise KeyError(f"Unknown repeat assignment: {assignment_id}")
+
+    def put_architectural_assignment(
+        self, assignment: ArchitecturalAssignment
+    ) -> ArchitecturalAssignment:
+        if assignment.project_id != self.manifest.project_id:
+            raise ValueError("Architectural assignment belongs to another project")
+        source = self.get_source(assignment.source_id)
+        subject = self.get_element(assignment.subject_element_id)
+        if source.discipline != Discipline.ARCHITECTURAL:
+            raise ValueError("Mimari ilişki yalnız mimari kaynakta kurulabilir")
+        if subject.discipline != Discipline.ARCHITECTURAL:
+            raise ValueError("Mimari ilişki yalnız mimari eleman için kurulabilir")
+        targets = [self.get_element(element_id) for element_id in assignment.target_element_ids]
+        if any(target.discipline != Discipline.ARCHITECTURAL for target in targets):
+            raise ValueError("Mimari ilişki hedefleri mimari eleman olmalıdır")
+        if assignment.approved and (
+            not assignment.reviewer.strip() or len(assignment.reason.strip()) < 3
+        ):
+            raise ValueError("Onaylı mimari ilişki için kullanıcı ve gerekçe zorunludur")
+        assignment.target_element_ids = list(dict.fromkeys(assignment.target_element_ids))
+        assignment.updated_at = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO architectural_assignments(
+                    id, source_id, subject_element_id, kind, approved, data
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    source_id=excluded.source_id,
+                    subject_element_id=excluded.subject_element_id,
+                    kind=excluded.kind,
+                    approved=excluded.approved,
+                    data=excluded.data
+                """,
+                (
+                    assignment.id,
+                    assignment.source_id,
+                    assignment.subject_element_id,
+                    assignment.kind.value,
+                    int(assignment.approved),
+                    assignment.model_dump_json(),
+                ),
+            )
+        return assignment
+
+    def list_architectural_assignments(
+        self,
+        *,
+        source_id: str | None = None,
+        subject_element_id: str | None = None,
+    ) -> list[ArchitecturalAssignment]:
+        query = "SELECT data FROM architectural_assignments"
+        clauses: list[str] = []
+        params: list[str] = []
+        if source_id:
+            clauses.append("source_id=?")
+            params.append(source_id)
+        if subject_element_id:
+            clauses.append("subject_element_id=?")
+            params.append(subject_element_id)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY rowid"
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [ArchitecturalAssignment.model_validate_json(row["data"]) for row in rows]
+
+    def delete_architectural_assignment(self, assignment_id: str) -> None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM architectural_assignments WHERE id=?", (assignment_id,)
+            )
+        if cursor.rowcount == 0:
+            raise KeyError(f"Unknown architectural assignment: {assignment_id}")
 
     def replace_element_evidence(
         self, element_id: str, evidence: Iterable[ElementEvidence]
@@ -868,6 +956,19 @@ class ProjectWorkspace:
                 connection.execute(
                     f"DELETE FROM element_evidence WHERE element_id IN ({marks})", stale_ids
                 )
+                connection.execute(
+                    f"DELETE FROM architectural_assignments WHERE subject_element_id IN ({marks})",
+                    stale_ids,
+                )
+                assignment_rows = connection.execute(
+                    "SELECT id, data FROM architectural_assignments"
+                ).fetchall()
+                for row in assignment_rows:
+                    item = ArchitecturalAssignment.model_validate_json(row["data"])
+                    if any(target_id in stale_ids for target_id in item.target_element_ids):
+                        connection.execute(
+                            "DELETE FROM architectural_assignments WHERE id=?", (row["id"],)
+                        )
                 connection.execute(f"DELETE FROM elements WHERE id IN ({marks})", stale_ids)
 
             decisions_by_element: dict[str, list[ReviewDecision]] = {}
@@ -987,8 +1088,7 @@ class ProjectWorkspace:
                     reason=decision.reason,
                     old_values=old_values,
                     new_values={
-                        key: float(value)
-                        for key, value in decision.measurement_overrides.items()
+                        key: float(value) for key, value in decision.measurement_overrides.items()
                     },
                     source_id=element.source_id,
                 )
@@ -1193,9 +1293,7 @@ class ProjectWorkspace:
             rows = connection.execute("SELECT data FROM quantity_lines ORDER BY rowid").fetchall()
         return [QuantityLine.model_validate_json(row["data"]) for row in rows]
 
-    def put_price_catalog(
-        self, catalog: PriceCatalog, items: Iterable[PriceItem]
-    ) -> PriceCatalog:
+    def put_price_catalog(self, catalog: PriceCatalog, items: Iterable[PriceItem]) -> PriceCatalog:
         if catalog.project_id != self.manifest.project_id:
             raise ValueError("Price catalog belongs to another project")
         values = list(items)
@@ -1209,10 +1307,7 @@ class ProjectWorkspace:
             connection.execute("DELETE FROM price_items WHERE catalog_id=?", (catalog.id,))
             connection.executemany(
                 "INSERT INTO price_items(id, catalog_id, code, data) VALUES (?, ?, ?, ?)",
-                [
-                    (item.id, item.catalog_id, item.code, item.model_dump_json())
-                    for item in values
-                ],
+                [(item.id, item.catalog_id, item.code, item.model_dump_json()) for item in values],
             )
         return catalog
 
@@ -1263,9 +1358,7 @@ class ProjectWorkspace:
             line for line in self.list_quantities() if line.id == mapping.quantity_line_id
         )
         if price_item.unit.casefold() != quantity.unit.casefold():
-            raise ValueError(
-                f"Birim uyuşmuyor: metraj {quantity.unit}, fiyat {price_item.unit}"
-            )
+            raise ValueError(f"Birim uyuşmuyor: metraj {quantity.unit}, fiyat {price_item.unit}")
         if mapping.status == MappingStatus.APPROVED and (
             not mapping.reviewer.strip() or len(mapping.reason.strip()) < 3
         ):
@@ -1321,8 +1414,7 @@ class ProjectWorkspace:
             unresolved = [item.label for item in scenario.adjustments if item.applicable is None]
             if unresolved:
                 raise ValueError(
-                    "Teklif onayı için uygulanır/uygulanmaz kararı eksik: "
-                    + ", ".join(unresolved)
+                    "Teklif onayı için uygulanır/uygulanmaz kararı eksik: " + ", ".join(unresolved)
                 )
             if not scenario.reviewer.strip():
                 raise ValueError("Onaylı teklif senaryosu için kullanıcı zorunludur")

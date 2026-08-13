@@ -92,6 +92,13 @@ class EvidenceKind(StrEnum):
     MANUAL = "manual"
 
 
+class ArchitecturalAssignmentKind(StrEnum):
+    ROOM_BOUNDARY = "room_boundary"
+    OPENING_HOST = "opening_host"
+    OPENING_ROOMS = "opening_rooms"
+    FINISH_POLICY = "finish_policy"
+
+
 class MappingStatus(StrEnum):
     SUGGESTED = "suggested"
     APPROVED = "approved"
@@ -126,7 +133,7 @@ class AnalysisStatus(StrEnum):
 
 
 class ProjectManifest(BaseModel):
-    schema_version: int = 2
+    schema_version: int = 3
     project_id: str = Field(default_factory=lambda: new_id("prj"))
     name: str
     created_at: datetime = Field(default_factory=utc_now)
@@ -232,6 +239,23 @@ class ManualOverride(BaseModel):
     source_id: str = ""
     source_page: int | None = None
     created_at: datetime = Field(default_factory=utc_now)
+
+
+class ArchitecturalAssignment(BaseModel):
+    """Traceable engineer decision for non-numeric architectural relationships."""
+
+    id: str = Field(default_factory=lambda: new_id("arc"))
+    project_id: str
+    source_id: str
+    subject_element_id: str
+    kind: ArchitecturalAssignmentKind
+    target_element_ids: list[str] = Field(default_factory=list)
+    values: dict[str, Any] = Field(default_factory=dict)
+    approved: bool = False
+    reviewer: str = ""
+    reason: str = ""
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
 class Geometry(BaseModel):

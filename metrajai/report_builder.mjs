@@ -12,6 +12,7 @@ const sheets = Object.fromEntries(
   [
     "Özet", "Kaynaklar", "Elemanlar", "Metraj", "Varsayımlar", "Uyarılar",
     "Poz Eşleştirme", "Birim Fiyatlar", "Teklif Senaryosu", "Teklif Özeti",
+    "Mimari Kırılım",
   ].map(
     (name) => [name, workbook.worksheets.add(name)],
   ),
@@ -67,6 +68,7 @@ const {
   sources, elements, quantities, assumptions, warnings, project,
   price_catalogs: priceCatalogs = [], price_items: priceItems = [],
   price_mappings: priceMappings = [], offers = [], validation_gates: validationGates = [],
+  architectural_assignments: architecturalAssignments = [],
 } = payload;
 
 {
@@ -83,6 +85,39 @@ const {
   );
   if (rows.length) sheet.getRange(`K5:K${rows.length + 4}`).format.numberFormat = "#,##0";
   if (rows.length) sheet.getRange(`M5:M${rows.length + 4}`).format.numberFormat = "yyyy-mm-dd hh:mm";
+}
+
+{
+  const sheet = sheets["Mimari Kırılım"];
+  addTitle(sheet, "MİMARİ KIRILIM", "Mahal ve malzeme bazında brüt alan − doğrulanmış açıklık = net alan", "R");
+  const architectural = elements.filter((item) =>
+    item.discipline === "architectural"
+    && ["room", "wall", "door", "window", "finish_area"].includes(item.element_type)
+  );
+  const rows = architectural.map((item) => {
+    const m = item.measurements;
+    const p = item.properties ?? {};
+    const gross = m.gross_area_m2 ?? m.opening_area_m2 ?? m.area_m2 ?? null;
+    return [
+      item.id, item.element_type, item.floor, p.room_code ?? "", p.room_name ?? "",
+      p.surface_type ?? "", p.material ?? p.opening_material ?? "", gross,
+      m.opening_area_m2 ?? 0, null, gross === null ? "adet" : "m²",
+      p.host_wall_id ?? "", (p.adjacent_room_ids ?? []).join("; "), item.source_id,
+      item.source_handle, item.review_status, p.calculation_policy ?? "",
+      JSON.stringify(architecturalAssignments.filter((value) => value.subject_element_id === item.id)),
+    ];
+  });
+  addTable(sheet, 4, ["Eleman ID", "Tür", "Kat", "Mahal Kodu", "Mahal Adı", "Yüzey", "Malzeme/Tip", "Brüt Alan", "Açıklık Alanı", "Net Alan", "Birim", "Duvar ID", "Komşu Mahaller", "Kaynak ID", "Handle/Satır", "Onay", "Hesap Politikası", "İlişki Kararları"], rows, "R");
+  architectural.forEach((item, index) => {
+    if ((item.measurements.gross_area_m2 ?? item.measurements.opening_area_m2 ?? item.measurements.area_m2) !== undefined) {
+      const row = index + 5;
+      sheet.getRange(`J${row}`).formulas = [[`=MAX(0,H${row}-I${row})`]];
+    }
+  });
+  [22, 14, 12, 13, 25, 13, 42, 13, 13, 13, 9, 22, 30, 22, 18, 13, 34, 50].forEach(
+    (width, index) => sheet.getRangeByIndexes(0, index, Math.max(rows.length + 4, 5), 1).format.columnWidth = width,
+  );
+  if (rows.length) sheet.getRange(`H5:J${rows.length + 4}`).format.numberFormat = "#,##0.000";
 }
 
 const elementRows = new Map();
@@ -169,8 +204,10 @@ const quantityRows = new Map();
       sheet.getRange(`S${row}`).formulas = [[`='Varsayımlar'!C${assumptionRow}`]];
       formula = `=R${row}*S${row}/100`;
     } else if (["wall:0", "landscape_linear:0", "pipe:0", "duct:0", "cable:0", "cable_tray:0"].includes(item.formula_key)) formula = `=L${row}`;
-    else if (item.formula_key === "wall:1") formula = `=L${row}*K${row}`;
-    else if (["room:0", "room:1", "landscape_area:0", "finish_area:0"].includes(item.formula_key)) formula = `=N${row}`;
+    else if (item.formula_key === "wall:1") formula = `=${Number(item.variables.net_area_m2)}`;
+    else if (item.formula_key === "wall:2") formula = `=L${row}*K${row}*M${row}`;
+    else if (item.formula_key === "finish_area:0") formula = `=${Number(item.variables.net_area_m2)}`;
+    else if (["room:0", "room:1", "landscape_area:0"].includes(item.formula_key)) formula = `=N${row}`;
     else if (item.formula_key === "room:2") formula = `=O${row}`;
     else formula = `=${Number(item.quantity)}`;
     sheet.getRange(`T${row}`).formulas = [[formula]];

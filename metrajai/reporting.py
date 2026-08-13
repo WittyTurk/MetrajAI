@@ -45,7 +45,7 @@ def build_report_payload(workspace: ProjectWorkspace) -> dict:
     for line in quantities:
         totals[(line.discipline.value, line.category, line.unit)] += line.quantity
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "project": workspace.manifest.model_dump(mode="json"),
         "summary": [
             {
@@ -68,6 +68,9 @@ def build_report_payload(workspace: ProjectWorkspace) -> dict:
         ],
         "repeat_assignments": [
             item.model_dump(mode="json") for item in workspace.list_repeat_assignments()
+        ],
+        "architectural_assignments": [
+            item.model_dump(mode="json") for item in workspace.list_architectural_assignments()
         ],
         "element_evidence": [
             item.model_dump(mode="json") for item in workspace.list_element_evidence()

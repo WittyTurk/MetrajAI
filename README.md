@@ -154,11 +154,18 @@ eleman ve manuel kontrol toplamları sağlandığında özel test alanında olu�
 
 ## Durum
 
-1.0 macOS pilotu; güvenilir çekirdek, yerel API/CLI, kat/pafta ve kontrollü tekrar,
-genişletilmiş statik revizyon, mimari/peyzaj inceleme hattı, deneysel mekanik-elektrik
-kapıları, fiyat/teklif modeli ve on sayfalı formüllü Excel raporunu içerir. Taranmış
-PDF OCR'ı cihazdan çıkmaz. Taziye, Defterdarlık ve Sütçüler altın referans onayları
-tamamlanmadan disiplinler `reliable` durumuna geçirilemez; mekanik ve elektrik kesin
-metrajı küçük ve karmaşık gerçek proje doğrulamasına kadar kilitli kalır.
+1.1 macOS pilotu; güvenilir çekirdek ve statik inceleme hattına ek olarak kat planı
+bağlamını ayıran mimari motoru içerir. Mahaller, çift yüzlü duvarlar, kapı/pencere
+adayları ve mahal + yüzey + malzeme kırılımlı iç kaplamalar izlenebilir ilişkilerle
+üretilir. Eksik sınır, yükseklik, çizelge tipi veya duvar ilişkisi kesin metrajı
+kilitler; kullanıcı kararları gerekçe ve kaynakla SQLite şema v3'te saklanır. Excel
+raporu on bir sayfadır ve mimari brüt/açıklık/net alanlarını formüllü olarak gösterir.
+
+Taranmış PDF OCR'ı cihazdan çıkmaz. Taziye Evi'nde ZK01-ZK10 ve 166,94 m² çizelge
+kanıtı korunur; 167,04 m² net ve 187,00 m² brüt değerleri ayrı kanıt olarak kalır.
+Defterdarlık uygulama, asma tavan ve mahal matrisi birlikte incelemeye alınır.
+Sütçüler mimari kaynakları ve üç projenin mühendis altın referansları tamamlanmadan
+mimari disiplin `reliable` durumuna geçirilmez. Mekanik ve elektrik kesin metrajı da
+küçük ve karmaşık gerçek proje doğrulamasına kadar kilitli kalır.
 
 Copyright © 2026. All rights reserved.

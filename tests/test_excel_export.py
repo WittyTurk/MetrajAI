@@ -33,7 +33,8 @@ def test_excel_export_uses_bundled_python_runtime_without_private_node(
     assert output.is_file()
     workbook = load_workbook(output, read_only=True, data_only=False)
     try:
-        assert len(workbook.sheetnames) == 10
+        assert len(workbook.sheetnames) == 11
+        assert "Mimari Kırılım" in workbook.sheetnames
     finally:
         workbook.close()
 

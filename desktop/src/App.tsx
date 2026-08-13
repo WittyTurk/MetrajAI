@@ -29,6 +29,7 @@ import { EngineApi } from "./api";
 import type {
   AnalysisRun,
   AnalysisWarning,
+  ArchitecturalAssignment,
   DetectedElement,
   Discipline,
   DrawingUnit,
@@ -121,6 +122,7 @@ function App() {
   const [warnings, setWarnings] = useState<AnalysisWarning[]>([]);
   const [floors, setFloors] = useState<FloorDefinition[]>([]);
   const [repeatAssignments, setRepeatAssignments] = useState<RepeatAssignment[]>([]);
+  const [architecturalAssignments, setArchitecturalAssignments] = useState<ArchitecturalAssignment[]>([]);
   const [priceCatalogs, setPriceCatalogs] = useState<PriceCatalog[]>([]);
   const [priceItems, setPriceItems] = useState<PriceItem[]>([]);
   const [priceMappings, setPriceMappings] = useState<PriceMapping[]>([]);
@@ -139,7 +141,7 @@ function App() {
     const [
       summary, nextSources, nextElements, nextQuantities, nextWarnings,
       nextFloors, nextRepeats, nextCatalogs, nextPriceItems, nextMappings,
-      nextOffers, nextGates,
+      nextOffers, nextGates, nextArchitecturalAssignments,
     ] =
       await Promise.all([
         api.project(projectId),
@@ -154,6 +156,7 @@ function App() {
         api.priceMappings(projectId),
         api.offerScenarios(projectId),
         api.validationGates(projectId),
+        api.architecturalAssignments(projectId),
       ]);
     setProject(summary);
     setSources(nextSources);
@@ -167,6 +170,7 @@ function App() {
     setPriceMappings(nextMappings);
     setOfferScenarios(nextOffers);
     setValidationGates(nextGates);
+    setArchitecturalAssignments(nextArchitecturalAssignments);
   }
 
   async function startAnalysis() {
@@ -259,7 +263,7 @@ function App() {
         {view === "sources" && <SourcesView api={api} project={project} sources={sources} onChanged={() => void refresh()} onNext={() => setView("floors")} onError={setMessage} />}
         {view === "floors" && <FloorsView api={api} projectId={project.project.project_id} sources={sources} elements={elements} floors={floors} repeatAssignments={repeatAssignments} onChanged={() => void refresh()} onError={setMessage} onNext={() => setView("mapping")} />}
         {view === "mapping" && <MappingView api={api} projectId={project.project.project_id} sources={sources} onChanged={() => void refresh()} onNext={() => void startAnalysis()} />}
-        {view === "review" && <ReviewView api={api} projectId={project.project.project_id} elements={elements} warnings={warnings} onChanged={() => void refresh()} onNext={() => setView("quantities")} />}
+        {view === "review" && <ReviewView api={api} projectId={project.project.project_id} elements={elements} assignments={architecturalAssignments} warnings={warnings} onChanged={() => void refresh()} onNext={() => setView("quantities")} />}
         {view === "quantities" && <QuantitiesView api={api} projectId={project.project.project_id} quantities={quantities} pendingCount={pendingCount} onMessage={setMessage} />}
         {view === "commercial" && <CommercialView api={api} projectId={project.project.project_id} quantities={quantities} catalogs={priceCatalogs} priceItems={priceItems} mappings={priceMappings} scenarios={offerScenarios} gates={validationGates} onChanged={() => void refresh()} onError={setMessage} />}
         {view === "revisions" && <RevisionComparisonView api={api} projectId={project.project.project_id} sources={sources} />}
@@ -618,10 +622,11 @@ interface RebarRevisionCandidate {
   scope_labels: string[];
 }
 
-function ReviewView({ api, projectId, elements, warnings, onChanged, onNext }: { api: EngineApi; projectId: string; elements: DetectedElement[]; warnings: AnalysisWarning[]; onChanged: () => void; onNext: () => void }) {
+function ReviewView({ api, projectId, elements, assignments, warnings, onChanged, onNext }: { api: EngineApi; projectId: string; elements: DetectedElement[]; assignments: ArchitecturalAssignment[]; warnings: AnalysisWarning[]; onChanged: () => void; onNext: () => void }) {
   const [filter, setFilter] = useState<ReviewStatus | "all">("all");
   const [typeFilter, setTypeFilter] = useState<string>("all");
   const [floorFilter, setFloorFilter] = useState<string>("all");
+  const [architectureTab, setArchitectureTab] = useState<"all" | "rooms" | "walls" | "openings" | "finishes">("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [bulkReason, setBulkReason] = useState("");
   const [busy, setBusy] = useState(false);
@@ -633,6 +638,11 @@ function ReviewView({ api, projectId, elements, warnings, onChanged, onNext }: {
     (filter === "all" || item.review_status === filter)
     && (typeFilter === "all" || item.element_type === typeFilter)
     && (floorFilter === "all" || item.floor === floorFilter)
+    && (architectureTab === "all"
+      || (architectureTab === "rooms" && item.element_type === "room")
+      || (architectureTab === "walls" && item.element_type === "wall")
+      || (architectureTab === "openings" && ["door", "window"].includes(item.element_type))
+      || (architectureTab === "finishes" && item.element_type === "finish_area"))
   );
   const selected = filtered.find((item) => item.id === selectedId) ?? filtered[0];
   const pending = floorElements.filter((item) => ["pending", "needs_review"].includes(item.review_status)).length;
@@ -703,7 +713,7 @@ function ReviewView({ api, projectId, elements, warnings, onChanged, onNext }: {
   return <div className="review-layout">
     <section className="panel preview-panel">
       <div className="section-heading compact"><div><span className="eyebrow">DXF ÖNİZLEME</span><h2>Kaynak geometrisi</h2></div><span className="count-badge">{floorElements.length}</span></div>
-      <GeometryPreview elements={floorElements} selectedId={selected?.id} onSelect={setSelectedId} />
+      <GeometryPreview elements={floorElements} selectedId={selected?.id} relatedIds={architecturalRelatedIds(selected)} onSelect={setSelectedId} />
       <div className="legend"><span><i className="accepted" />Onaylı</span><span><i className="pending" />Bekliyor</span><span><i className="needs" />Eksik</span><span><i className="rejected" />Hariç</span></div>
       {warnings.length > 0 && <div className="warning-stack">{warnings.map((warning) => <div key={warning.id} className={`mini-warning ${warning.severity}`}><AlertTriangle size={15} /><span>{warning.message}</span></div>)}</div>}
     </section>
@@ -716,13 +726,17 @@ function ReviewView({ api, projectId, elements, warnings, onChanged, onNext }: {
           <select value={filter} onChange={(event) => setFilter(event.target.value as ReviewStatus | "all")}><option value="all">Tüm durumlar</option><option value="needs_review">Eksik bilgi</option><option value="pending">Onay bekliyor</option><option value="accepted">Onaylı</option><option value="rejected">Hariç</option></select>
         </div>
       </div>
+      {elements.some((item) => item.discipline === "architectural") && <div className="architecture-tabs">{([
+        ["all", "Tümü"], ["rooms", "Mahaller"], ["walls", "Duvarlar"],
+        ["openings", "Kapı / Pencere"], ["finishes", "Kaplamalar"],
+      ] as const).map(([value, label]) => <button key={value} className={architectureTab === value ? "active" : ""} onClick={() => { setArchitectureTab(value); setTypeFilter("all"); }}>{label}</button>)}</div>}
       {revisionCandidates.length > 1 && (typeFilter === "all" || typeFilter === "rebar") && <div className="revision-picker"><div><strong>Donatı revizyonunu seçin</strong><small>Seçim yapılmadan donatı kesin toplama giremez.</small></div>{revisionCandidates.map((candidate) => <button key={candidate.table_handle} className={selectedRevisionHandle === candidate.table_handle ? "selected" : ""} disabled={busy} onClick={() => void chooseRevision(candidate)}><span>Revizyon {candidate.label}</span><strong>{formatQuantity(candidate.declared_total_kg)} kg</strong><small>{candidate.row_count} poz · formül {formatQuantity(candidate.calculated_total_kg)} kg</small></button>)}</div>}
       <div className="review-subtotals">{previewTotals.map((total) => { const approved = approvedTotals.find((item) => item.key === total.key)?.value ?? 0; return <div key={total.key}><span>{total.category}</span><strong>{formatQuantity(approved)} <small>{total.unit}</small></strong><small>Aday: {formatQuantity(total.value)} {total.unit}</small></div>; })}{previewTotals.length === 0 && <div><span>Ara toplam</span><strong>—</strong><small>Hesaplanabilir eleman yok</small></div>}</div>
       {typeFilter !== "all" && <div className="comparison-wrap"><div className="comparison-head"><strong>{elementTypeLabel(typeFilter)} karşılaştırması</strong><span>{filtered.length} satır</span></div><div className="comparison-table"><div className="comparison-row head"><span>Eleman</span><span>Ölçüler</span><span>Hesap adayı</span><span>Durum</span></div>{filtered.map((element) => <button className={`comparison-row ${selected?.id === element.id ? "selected" : ""}`} key={element.id} onClick={() => setSelectedId(element.id)}><span><strong>{String(element.properties.element_label || elementTypeLabel(element.element_type))}</strong><small>{element.source_handle}</small></span><span>{measurementSummary(element)}</span><span>{quantitySummary(element)}</span><span className={`table-status ${element.review_status}`}>{STATUS_LABELS[element.review_status]}</span></button>)}</div></div>}
       <div className="element-strip">{filtered.map((element) => <button key={element.id} className={selected?.id === element.id ? "selected" : ""} onClick={() => setSelectedId(element.id)}><span className={`status-pin ${element.review_status}`} /><strong>{elementTypeLabel(element.element_type)}{element.properties.element_label ? ` · ${String(element.properties.element_label)}` : ""}</strong><small>{element.floor} · {element.layer}</small></button>)}</div>
       {typeFilter !== "all" && <div className="bulk-review"><div><strong>Güvenli toplu onay</strong><small>{bulkEligible.length} görünür eleman uygun; eksik/engelli satırlar dahil edilmez.</small></div><input value={bulkReason} onChange={(event) => setBulkReason(event.target.value)} placeholder="Pafta ve kontrol gerekçesi…" /><button className="button primary" disabled={busy || bulkEligible.length === 0 || bulkReason.trim().length < 3} onClick={() => void bulkAccept()}><Check size={16} /> {bulkEligible.length} elemanı onayla</button></div>}
       {resultMessage && <div className="inline-result"><Check size={15} />{resultMessage}</div>}
-      {selected ? <ElementReview api={api} projectId={projectId} element={selected} onChanged={onChanged} /> : <EmptyState icon={<Ruler />} title="Bu filtrede tespit yok" detail="Tür veya durum filtresini değiştirin." />}
+      {selected ? <ElementReview api={api} projectId={projectId} element={selected} allElements={elements} assignments={assignments} onChanged={onChanged} /> : <EmptyState icon={<Ruler />} title="Bu filtrede tespit yok" detail="Tür veya durum filtresini değiştirin." />}
       <div className="review-footer"><span>{elements.filter((item) => item.review_status === "accepted").length} onaylı eleman kesin metraja girecek.</span><button className="button secondary" onClick={onNext}>Kesin metrajı gör <ChevronRight size={16} /></button></div>
     </section>
   </div>;
@@ -774,17 +788,44 @@ function quantitySummary(element: DetectedElement) {
   return lines.length ? lines.map((line) => `${line.category}: ${formatQuantity(line.value)} ${line.unit}`).join(" · ") : "Hesap dışında";
 }
 
-function ElementReview({ api, projectId, element, onChanged }: { api: EngineApi; projectId: string; element: DetectedElement; onChanged: () => void }) {
+function ElementReview({ api, projectId, element, allElements, assignments, onChanged }: { api: EngineApi; projectId: string; element: DetectedElement; allElements: DetectedElement[]; assignments: ArchitecturalAssignment[]; onChanged: () => void }) {
   const keys = element.required_inputs;
   const [values, setValues] = useState<Record<string, string>>({});
   const [reason, setReason] = useState("");
+  const [relationReason, setRelationReason] = useState("");
+  const [hostWallId, setHostWallId] = useState("");
+  const [roomIds, setRoomIds] = useState<string[]>([]);
+  const [boundaryId, setBoundaryId] = useState("");
   const [busy, setBusy] = useState(false);
-  useEffect(() => { setValues(Object.fromEntries(keys.map((key) => [key, element.measurements[key]?.toString() ?? ""]))); setReason(""); }, [element.id]);
+  useEffect(() => {
+    setValues(Object.fromEntries(keys.map((key) => [key, element.measurements[key]?.toString() ?? ""])));
+    setReason("");
+    setRelationReason("");
+    setHostWallId(String(element.properties.host_wall_id ?? ""));
+    setRoomIds((element.properties.adjacent_room_ids as string[] | undefined) ?? []);
+    setBoundaryId(String(element.properties.boundary_element_id ?? ""));
+  }, [element.id]);
   async function decide(status: ReviewStatus) {
     setBusy(true);
     try {
       const overrides = Object.fromEntries(Object.entries(values).filter(([, value]) => value !== "").map(([key, value]) => [key, Number(value)]));
       await api.review(projectId, element.id, status, overrides, reason || (status === "accepted" ? "Geometri ve ölçüler kontrol edildi" : "Mühendis kararı"));
+      onChanged();
+    } finally { setBusy(false); }
+  }
+  async function saveRelation(kind: "room_boundary" | "opening_host" | "opening_rooms", targets: string[]) {
+    if (relationReason.trim().length < 3 || targets.length === 0) return;
+    setBusy(true);
+    try {
+      await api.createArchitecturalAssignment(projectId, {
+        source_id: element.source_id,
+        subject_element_id: element.id,
+        kind,
+        target_element_ids: targets,
+        approved: true,
+        reviewer: "Mühendis",
+        reason: relationReason.trim(),
+      });
       onChanged();
     } finally { setBusy(false); }
   }
@@ -849,6 +890,10 @@ function ElementReview({ api, projectId, element, onChanged }: { api: EngineApi;
   const formworkEvidence = element.properties.formwork_evidence as { adjacent_slab_thicknesses_m: number[]; exposed_side_depths_m: number[]; policy: string } | undefined;
   const rebarEvidence = element.element_type === "rebar" ? element.properties as { position_number: number; declared_weight_kg: number; calculated_weight_kg: number; rebar_scope_labels: string[]; table_handle: string } : undefined;
   const elementLabel = typeof element.properties.element_label === "string" ? element.properties.element_label : "";
+  const relationAssignments = assignments.filter((item) => item.subject_element_id === element.id && item.approved);
+  const boundaryCandidates = allElements.filter((item) => item.discipline === "architectural" && item.element_type === "room" && item.id !== element.id && item.geometry.kind === "room_boundary");
+  const wallCandidates = allElements.filter((item) => item.discipline === "architectural" && item.element_type === "wall");
+  const roomCandidates = allElements.filter((item) => item.discipline === "architectural" && item.element_type === "room" && item.geometry.kind !== "room_boundary");
   const blockingMessage = blocking.some((issue) => issue === "blocking:stair_floor_repeat_required")
     ? "Tip merdivenin uygulanacağı kat aralıkları henüz tanımlanmadı; bu aday kesin metraja kapalıdır."
     : "Pafta birimi veya kesit kanıtı geometriyle uyuşmuyor. Kaynak eşlemesini düzeltip analizi yeniden çalıştırın.";
@@ -895,6 +940,16 @@ function ElementReview({ api, projectId, element, onChanged }: { api: EngineApi;
       {rebarEvidence && (
         <div className="evidence-note"><Ruler size={17} /><span><strong>Açık donatı metraj satırı · Poz {rebarEvidence.position_number}</strong>Pafta {formatQuantity(rebarEvidence.declared_weight_kg)} kg · formül kontrolü {formatQuantity(rebarEvidence.calculated_weight_kg)} kg<small>Kapsam {rebarEvidence.rebar_scope_labels[0]}–{rebarEvidence.rebar_scope_labels.at(-1)} · tablo handle {rebarEvidence.table_handle}</small></span></div>
       )}
+      {element.discipline === "architectural" && <div className="architectural-relations">
+        <div><strong>Mimari ilişki kararları</strong><small>{relationAssignments.length ? `${relationAssignments.length} gerekçeli karar kayıtlı` : "Eksik bağlantılar kesin metrajı engeller."}</small></div>
+        {element.element_type === "room" && element.issues.includes("blocking:room_boundary_assignment_required") && <div className="relation-row"><label>Mahal sınırı<select value={boundaryId} onChange={(event) => setBoundaryId(event.target.value)}><option value="">Sınır seçin</option>{boundaryCandidates.map((item) => <option value={item.id} key={item.id}>{String(item.properties.room_code || item.source_handle)}</option>)}</select></label><button className="button secondary" disabled={busy || !boundaryId || relationReason.trim().length < 3} onClick={() => void saveRelation("room_boundary", [boundaryId])}>Sınırı bağla</button></div>}
+        {["door", "window"].includes(element.element_type) && <>
+          <div className="relation-row"><label>Taşıyıcı duvar<select value={hostWallId} onChange={(event) => setHostWallId(event.target.value)}><option value="">Duvar seçin</option>{wallCandidates.map((item) => <option value={item.id} key={item.id}>{item.source_handle} · {formatQuantity(item.measurements.length_m ?? 0)} m</option>)}</select></label><button className="button secondary" disabled={busy || !hostWallId || relationReason.trim().length < 3} onClick={() => void saveRelation("opening_host", [hostWallId])}>Duvara bağla</button></div>
+          <div className="relation-row"><label>Komşu mahaller<select multiple value={roomIds} onChange={(event) => setRoomIds(Array.from(event.target.selectedOptions).map((option) => option.value).slice(0, 2))}>{roomCandidates.map((item) => <option value={item.id} key={item.id}>{String(item.properties.room_code || item.properties.room_name || item.source_handle)}</option>)}</select></label><button className="button secondary" disabled={busy || roomIds.length === 0 || relationReason.trim().length < 3} onClick={() => void saveRelation("opening_rooms", roomIds)}>Mahallere bağla</button></div>
+        </>}
+        {(element.element_type === "room" || ["door", "window"].includes(element.element_type)) && <label>İlişki gerekçesi<input value={relationReason} onChange={(event) => setRelationReason(event.target.value)} placeholder="Kontrol edilen plan/çizelge…" /></label>}
+        {element.element_type === "finish_area" && <div className="finish-policy"><span><strong>{String(element.properties.surface_type ?? "Yüzey")}</strong> · {String(element.properties.material ?? "Malzeme bekleniyor")}</span><small>Brüt {formatQuantity(element.measurements.gross_area_m2 ?? 0)} m² − açıklık {formatQuantity(element.measurements.opening_area_m2 ?? 0)} m² = net {formatQuantity(element.measurements.net_area_m2 ?? 0)} m²</small><small>Politika: {String(element.properties.calculation_policy ?? "—")}</small></div>}
+      </div>}
       <div className="measurement-grid">
         {keys.map((key) => (
           <label key={key}>{measurementLabel(element.element_type, key)}<input type="number" min="0" step="any" value={values[key] ?? ""} onChange={(event) => setValues((current) => ({ ...current, [key]: event.target.value }))} className={!values[key] && element.required_inputs.includes(key) ? "required" : ""} /></label>
@@ -938,7 +993,18 @@ function previewContext(elements: DetectedElement[], selected?: DetectedElement)
   return sameFloor.length ? sameFloor : sameSource.length ? sameSource : elements;
 }
 
-function GeometryPreview({ elements, selectedId, onSelect }: { elements: DetectedElement[]; selectedId?: string; onSelect: (id: string) => void }) {
+function architecturalRelatedIds(element?: DetectedElement) {
+  if (!element || element.discipline !== "architectural") return [];
+  const values = [
+    element.properties.room_id,
+    element.properties.boundary_element_id,
+    element.properties.host_wall_id,
+    ...(Array.isArray(element.properties.adjacent_room_ids) ? element.properties.adjacent_room_ids : []),
+  ];
+  return values.filter((value): value is string => typeof value === "string" && Boolean(value));
+}
+
+function GeometryPreview({ elements, selectedId, relatedIds = [], onSelect }: { elements: DetectedElement[]; selectedId?: string; relatedIds?: string[]; onSelect: (id: string) => void }) {
   const drawingElements = useMemo(
     () => elements.filter((item) => !item.geometry.kind.endsWith("_schedule_row") && Boolean(item.geometry.bbox)),
     [elements],
@@ -986,7 +1052,7 @@ function GeometryPreview({ elements, selectedId, onSelect }: { elements: Detecte
       const coords = points.length > 1
         ? points.map(([x, y]) => `${x},${-y}`).join(" ")
         : box ? `${box[0]},${-box[1]} ${box[2]},${-box[1]} ${box[2]},${-box[3]} ${box[0]},${-box[3]} ${box[0]},${-box[1]}` : "";
-      return coords && <polyline key={element.id} points={coords} className={`${element.review_status} ${selectedId === element.id ? "selected" : ""}`} vectorEffect="non-scaling-stroke" onClick={() => onSelect(element.id)} />;
+      return coords && <polyline key={element.id} points={coords} className={`${element.review_status} ${selectedId === element.id ? "selected" : ""} ${relatedIds.includes(element.id) ? "related" : ""}`} vectorEffect="non-scaling-stroke" onClick={() => onSelect(element.id)} />;
     })}</svg>
     {drawingElements.length === 0 && <div className="drawing-empty">Analiz sonrası geometri burada görünür.</div>}
     {drawingElements.length > 0 && visibleElements.length === 0 && <div className="drawing-empty">Bu kayıtta çizilebilir plan geometrisi yok.</div>}

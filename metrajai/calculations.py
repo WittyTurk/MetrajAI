@@ -214,11 +214,20 @@ DEFINITIONS: dict[str, tuple[QuantityDefinition, ...]] = {
         ),
         QuantityDefinition(
             "Mimari",
-            "Duvar yüzeyi (tek yüz)",
+            "Duvar yüzeyi (açıklıklar düşülmüş tek yüz)",
             "m²",
-            "length_m * height_m",
-            ("length_m", "height_m"),
-            lambda v: v["length_m"] * v["height_m"],
+            "net_area_m2",
+            ("net_area_m2",),
+            lambda v: v["net_area_m2"],
+        ),
+        QuantityDefinition(
+            "Mimari",
+            "Duvar hacmi",
+            "m³",
+            "length_m * height_m * thickness_m",
+            ("length_m", "height_m", "thickness_m"),
+            lambda v: v["length_m"] * v["height_m"] * v["thickness_m"],
+            optional=True,
         ),
     ),
     "door": (
@@ -277,6 +286,18 @@ def derive_element_measurements(element: DetectedElement) -> None:
                 * values["waist_thickness_m"],
                 6,
             )
+    elif element.element_type == "wall":
+        if values.get("length_m", 0) > 0 and values.get("height_m", 0) > 0:
+            gross = values["length_m"] * values["height_m"]
+            opening = max(0.0, values.get("opening_area_m2", 0.0))
+            values["gross_area_m2"] = round(gross, 6)
+            values["net_area_m2"] = round(max(0.0, gross - opening), 6)
+    elif element.element_type in {"door", "window"}:
+        if values.get("width_m", 0) > 0 and values.get("height_m", 0) > 0:
+            values["opening_area_m2"] = round(values["width_m"] * values["height_m"], 6)
+    elif element.element_type == "finish_area":
+        if values.get("net_area_m2", 0) <= 0 and values.get("area_m2", 0) > 0:
+            values["net_area_m2"] = values["area_m2"]
 
 
 def _value_of(key: str) -> Callable[[dict[str, float]], float]:
@@ -288,7 +309,7 @@ def _value_of(key: str) -> Callable[[dict[str, float]], float]:
 
 for element_type, category, description, unit, variable in (
     ("landscape_area", "Peyzaj", "Peyzaj alanı", "m²", "area_m2"),
-    ("finish_area", "Mimari", "Kaplama alanı", "m²", "area_m2"),
+    ("finish_area", "Mimari", "Kaplama net alanı", "m²", "net_area_m2"),
     ("landscape_linear", "Peyzaj", "Bordür/hat uzunluğu", "m", "length_m"),
     ("landscape_item", "Peyzaj", "Bitki/ekipman adedi", "adet", "count"),
     ("pipe", "Mekanik", "Boru merkez hattı", "m", "length_m"),

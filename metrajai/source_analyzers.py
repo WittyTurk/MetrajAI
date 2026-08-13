@@ -66,7 +66,11 @@ def _find_columns(rows: list[list[Any]]) -> tuple[int, dict[str, int]]:
             for key, names in aliases.items():
                 if normalized in names:
                     mapping.setdefault(key, column)
-        if len(mapping) > len(best[1]):
+        if len(mapping) > len(best[1]) or (
+            len(mapping) == len(best[1])
+            and any(key in mapping for key in ("room", "area", "code", "unit"))
+            and not any(key in best[1] for key in ("room", "area", "code", "unit"))
+        ):
             best = row_index, mapping
     return best
 
@@ -108,23 +112,111 @@ def analyze_spreadsheet_source(
     try:
         rows = read_spreadsheet_rows(path)
     except CatalogImportError as exc:
-        return [], [
-            AnalysisWarning(
-                code="SPREADSHEET_IMPORT_FAILED",
-                message=str(exc),
-                source_id=source.id,
-                severity="error",
-            )
-        ], DrawingUnit.UNKNOWN
+        return (
+            [],
+            [
+                AnalysisWarning(
+                    code="SPREADSHEET_IMPORT_FAILED",
+                    message=str(exc),
+                    source_id=source.id,
+                    severity="error",
+                )
+            ],
+            DrawingUnit.UNKNOWN,
+        )
     header_row, columns = _find_columns(rows)
     elements: list[DetectedElement] = []
     warnings: list[AnalysisWarning] = []
-    if "room" in columns and "area" in columns:
+    if (
+        source.discipline == Discipline.ARCHITECTURAL
+        and "room" in columns
+        and "area" not in columns
+    ):
+        room_column = columns["room"]
+        floor_column = max(0, room_column - 1)
+        code_row = rows[header_row] if header_row < len(rows) else []
+        description_row = rows[header_row - 1] if header_row > 0 else []
+        section_row = rows[header_row - 2] if header_row > 1 else []
+        sections: list[str] = []
+        active_section = ""
+        for column in range(max(len(code_row), len(description_row), len(section_row))):
+            if column < len(section_row) and str(section_row[column] or "").strip():
+                active_section = str(section_row[column]).strip()
+            sections.append(active_section)
+        current_floor = source.floor
+        for row_number, row in enumerate(rows[header_row + 1 :], start=header_row + 2):
+            if floor_column < len(row) and str(row[floor_column] or "").strip():
+                candidate_floor = str(row[floor_column]).strip()
+                normalized_floor = _normalize(candidate_floor)
+                if any(token in normalized_floor for token in ("kat", "bodrum", "zemin", "normal")):
+                    current_floor = candidate_floor
+            room_name = str(row[room_column] or "").strip() if room_column < len(row) else ""
+            match = re.match(
+                r"^(?P<code>(?:[A-ZÇĞİÖŞÜ]+)?\d+)\s+(?P<name>.+)$",
+                room_name,
+                re.IGNORECASE,
+            )
+            if match is None:
+                continue
+            applications: list[dict[str, str]] = []
+            for column in range(room_column + 1, len(row)):
+                marker = _normalize(row[column])
+                if marker not in {"o", "x", "1", "+"}:
+                    continue
+                code = str(code_row[column] or "").strip() if column < len(code_row) else ""
+                description = (
+                    str(description_row[column] or "").strip()
+                    if column < len(description_row)
+                    else ""
+                )
+                if not code and not description:
+                    continue
+                applications.append(
+                    {
+                        "section": sections[column] if column < len(sections) else "",
+                        "position_code": code,
+                        "material": description,
+                    }
+                )
+            room_code = match.group("code").upper()
+            elements.append(
+                DetectedElement(
+                    id=_stable_element_id(source.id, f"room-matrix:{room_code}"),
+                    source_id=source.id,
+                    discipline=source.discipline,
+                    element_type="room",
+                    floor=current_floor,
+                    source_handle=f"sheet-row-{row_number}",
+                    geometry=Geometry(kind="spreadsheet_schedule_row"),
+                    properties={
+                        "room_code": room_code,
+                        "room_name": match.group("name").strip(),
+                        "source_row": row_number,
+                        "finish_applicability": applications,
+                        "schedule_only": True,
+                    },
+                    required_inputs=["area_m2"],
+                    confidence=0.9,
+                    review_status=ReviewStatus.NEEDS_REVIEW,
+                    issues=["blocking:room_boundary_assignment_required", "missing:area_m2"],
+                )
+            )
+        warnings.append(
+            AnalysisWarning(
+                code="ARCHITECTURAL_FINISH_MATRIX_EXTRACTED",
+                message=(
+                    f"Excel mahal/imalat matrisinden {len(elements)} mahal ve "
+                    "uygulanabilir kaplama pozları okundu; alanlar plan geometrisiyle "
+                    "eşleşmeden kesin metraja alınmayacak."
+                ),
+                source_id=source.id,
+                severity="info",
+            )
+        )
+    elif "room" in columns and "area" in columns:
         for row_number, row in enumerate(rows[header_row + 1 :], start=header_row + 2):
             room_name = (
-                str(row[columns["room"]] or "").strip()
-                if columns["room"] < len(row)
-                else ""
+                str(row[columns["room"]] or "").strip() if columns["room"] < len(row) else ""
             )
             area = _number(row[columns["area"]]) if columns["area"] < len(row) else None
             if not room_name:
@@ -150,6 +242,7 @@ def analyze_spreadsheet_source(
     elif {"code", "description", "unit"}.issubset(columns):
         quantity_column = columns.get("quantity")
         for row_number, row in enumerate(rows[header_row + 1 :], start=header_row + 2):
+
             def cell(key: str, current_row: list[Any] = row) -> Any:
                 index = columns[key]
                 return current_row[index] if index < len(current_row) else None
@@ -232,14 +325,18 @@ def analyze_pdf_source(
     try:
         import pdfplumber
     except ImportError:
-        return [], [
-            AnalysisWarning(
-                code="PDF_RUNTIME_UNAVAILABLE",
-                message="PDF okuma bileşeni paketlenmemiş.",
-                source_id=source.id,
-                severity="error",
-            )
-        ], DrawingUnit.UNKNOWN
+        return (
+            [],
+            [
+                AnalysisWarning(
+                    code="PDF_RUNTIME_UNAVAILABLE",
+                    message="PDF okuma bileşeni paketlenmemiş.",
+                    source_id=source.id,
+                    severity="error",
+                )
+            ],
+            DrawingUnit.UNKNOWN,
+        )
     elements: list[DetectedElement] = []
     warnings: list[AnalysisWarning] = []
     scanned_pages: dict[int, tuple[float, float]] = {}
@@ -387,11 +484,15 @@ def analyze_non_dxf_source(
         return analyze_spreadsheet_source(source, path)
     if source.source_format == SourceFormat.PDF:
         return analyze_pdf_source(source, path)
-    return [], [
-        AnalysisWarning(
-            code="UNSUPPORTED_SOURCE_FORMAT",
-            message=f"Kaynak biçimi analiz edilemiyor: {source.source_format.value}",
-            source_id=source.id,
-            severity="error",
-        )
-    ], DrawingUnit.UNKNOWN
+    return (
+        [],
+        [
+            AnalysisWarning(
+                code="UNSUPPORTED_SOURCE_FORMAT",
+                message=f"Kaynak biçimi analiz edilemiyor: {source.source_format.value}",
+                source_id=source.id,
+                severity="error",
+            )
+        ],
+        DrawingUnit.UNKNOWN,
+    )

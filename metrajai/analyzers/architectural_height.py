@@ -193,7 +193,7 @@ def apply_architectural_heights(
             and element.element_type in {"column", "shear_wall"}
         ) or (
             element.discipline == Discipline.ARCHITECTURAL
-            and element.element_type == "wall"
+            and element.element_type in {"wall", "room"}
         )
         if not supported:
             continue

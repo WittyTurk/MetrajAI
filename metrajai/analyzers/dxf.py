@@ -24,6 +24,7 @@ from ..contracts import (
     SourceFile,
 )
 from ..units import unit_from_insunits, unit_scale
+from .architectural_plan import extract_architectural_plan, reconcile_architectural_elements
 from .architectural_schedule import extract_architectural_schedules
 from .foundation_plan import extract_foundation_application_plans
 from .multiview_structural import (
@@ -355,7 +356,10 @@ class DxfAnalyzer:
             if schedule_result.elements:
                 elements.extend(schedule_result.elements)
                 warnings.extend(schedule_result.warnings)
-                specialized_types.add("room")
+            plan_elements, plan_warnings = extract_architectural_plan(document, source, chosen_unit)
+            elements.extend(plan_elements)
+            warnings.extend(plan_warnings)
+            specialized_types.update(("room", "wall", "door", "window", "finish_area"))
         if source.discipline == Discipline.STRUCTURAL:
             foundation = extract_foundation_application_plans(
                 document,
@@ -417,6 +421,10 @@ class DxfAnalyzer:
                 region_warnings = []
             warnings.extend(region_warnings)
         elements.extend(generic_elements)
+
+        if source.discipline == Discipline.ARCHITECTURAL:
+            elements, reconciliation_warnings = reconcile_architectural_elements(source, elements)
+            warnings.extend(reconciliation_warnings)
 
         if source.discipline == Discipline.STRUCTURAL:
             if not any(element.element_type == "rebar" for element in elements):
@@ -636,9 +644,7 @@ class DxfAnalyzer:
             # Keep it out until a paired-boundary wall detector is available.
             return None
         elif rule.element_type == "room":
-            if entity.dxftype() == "LWPOLYLINE" and not bool(
-                getattr(entity, "closed", False)
-            ):
+            if entity.dxftype() == "LWPOLYLINE" and not bool(getattr(entity, "closed", False)):
                 return None
             if measurements.get("area_m2", 0.0) < 0.5:
                 # Tiny symbols and legend swatches are frequently placed on generic

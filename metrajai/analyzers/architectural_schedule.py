@@ -15,6 +15,7 @@ from ..contracts import (
 
 AREA_TEXT = re.compile(r"^(?P<value>\d+(?:[.,]\d+)?)\s*M(?:2|²)$", re.IGNORECASE)
 ROOM_CODE = re.compile(r"^[A-Z]{1,4}\d{1,3}$")
+OPENING_SIZE = re.compile(r"^(?P<width>\d{2,4})\s*[/X]\s*(?P<height>\d{2,4})$", re.IGNORECASE)
 
 
 def _normalize(value: str) -> str:
@@ -71,6 +72,33 @@ def _table_values(document, geometry_name: str) -> list[str]:
     except Exception:
         return []
     return [value for entity in block if (value := _text(entity))]
+
+
+def extract_opening_schedule(document) -> dict[str, dict[str, str | float]]:
+    """Return explicit door/window type dimensions from all table backing blocks."""
+    result: dict[str, dict[str, str | float]] = {}
+    for block in document.blocks:
+        values = [value for entity in block if (value := _text(entity))]
+        normalized = [_normalize(value) for value in values]
+        if "KAPI-PEN. ISMI" not in normalized and "KAPI-PENCERE OLCUSU" not in normalized:
+            continue
+        for index in range(len(values) - 2):
+            code = _normalize(values[index]).replace(" ", "")
+            match = OPENING_SIZE.fullmatch(_normalize(values[index + 1]).replace(" ", ""))
+            if not code or match is None:
+                continue
+            width = float(match.group("width")) / 100
+            height = float(match.group("height")) / 100
+            if not (0.2 <= width <= 5 and 0.2 <= height <= 5):
+                continue
+            result[code] = {
+                "type_code": code,
+                "width_m": width,
+                "height_m": height,
+                "material": values[index + 2].strip(),
+                "schedule_block": block.name,
+            }
+    return result
 
 
 def _room_rows(values: list[str]) -> list[tuple[str, str, float, list[str]]]:
@@ -176,9 +204,7 @@ def extract_architectural_schedules(
         normalized = {_normalize(value) for value in values}
         if "BB NET ALAN" not in normalized or "BB BRUT ALAN" not in normalized:
             continue
-        reference_areas.extend(
-            parsed for value in values if (parsed := _area(value)) is not None
-        )
+        reference_areas.extend(parsed for value in values if (parsed := _area(value)) is not None)
     candidates = sorted({value for value in reference_areas if value >= room_area * 0.9})
     reference_net = (
         min(candidates, key=lambda value: abs(value - room_area)) if candidates else None
