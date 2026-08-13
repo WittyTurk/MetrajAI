@@ -891,27 +891,58 @@ function ElementReview({ api, projectId, element, onChanged }: { api: EngineApi;
   );
 }
 
+type PreviewBounds = [number, number, number, number];
+type PreviewMode = "context" | "selected" | "all";
+
+function elementBounds(elements: DetectedElement[]): PreviewBounds {
+  const boxes = elements
+    .map((item) => item.geometry.bbox)
+    .filter((box): box is PreviewBounds => box !== null && box.every(Number.isFinite));
+  if (!boxes.length) return [0, 0, 100, 100];
+  return [
+    Math.min(...boxes.map((box) => box[0])),
+    Math.min(...boxes.map((box) => box[1])),
+    Math.max(...boxes.map((box) => box[2])),
+    Math.max(...boxes.map((box) => box[3])),
+  ];
+}
+
+function previewContext(elements: DetectedElement[], selected?: DetectedElement) {
+  if (!selected) return elements;
+  const sameSource = elements.filter((item) => item.source_id === selected.source_id);
+  for (const property of ["plan_view_id", "plan_region_title", "plan_title"] as const) {
+    const value = selected.properties[property];
+    if (typeof value !== "string" || !value.trim()) continue;
+    const matching = sameSource.filter((item) => item.properties[property] === value);
+    if (matching.length) return matching;
+  }
+  const sameFloor = sameSource.filter((item) => item.floor === selected.floor);
+  return sameFloor.length ? sameFloor : sameSource.length ? sameSource : elements;
+}
+
 function GeometryPreview({ elements, selectedId, onSelect }: { elements: DetectedElement[]; selectedId?: string; onSelect: (id: string) => void }) {
-  const drawingElements = elements.filter((item) => item.geometry.kind !== "rebar_schedule_row");
-  const [focusSelected, setFocusSelected] = useState(false);
+  const drawingElements = useMemo(
+    () => elements.filter((item) => item.geometry.kind !== "rebar_schedule_row" && Boolean(item.geometry.bbox)),
+    [elements],
+  );
+  const selectedElement = elements.find((item) => item.id === selectedId);
+  const selectedDrawing = drawingElements.find((item) => item.id === selectedId);
+  const contextElements = useMemo(
+    () => previewContext(drawingElements, selectedElement),
+    [drawingElements, selectedElement],
+  );
+  const [mode, setMode] = useState<PreviewMode>("context");
   const [zoom, setZoom] = useState(1);
-  const allBounds = useMemo(() => {
-    const boxes = elements
-      .filter((item) => item.geometry.kind !== "rebar_schedule_row")
-      .map((item) => item.geometry.bbox)
-      .filter((box): box is [number, number, number, number] => Boolean(box));
-    if (!boxes.length) return [0, 0, 100, 100] as const;
-    return [
-      Math.min(...boxes.map((box) => box[0])),
-      Math.min(...boxes.map((box) => box[1])),
-      Math.max(...boxes.map((box) => box[2])),
-      Math.max(...boxes.map((box) => box[3])),
-    ] as const;
-  }, [elements]);
-  const selected = drawingElements.find((item) => item.id === selectedId);
-  const focusBounds = focusSelected && selected?.geometry.bbox
-    ? selected.geometry.bbox
-    : allBounds;
+  useEffect(() => {
+    setMode("context");
+    setZoom(1);
+  }, [selectedId]);
+  const visibleElements = mode === "all"
+    ? drawingElements
+    : mode === "selected" && selectedDrawing
+      ? [selectedDrawing]
+      : contextElements;
+  const focusBounds = elementBounds(visibleElements);
   const [x1, y1, x2, y2] = focusBounds;
   const baseWidth = Math.max(x2 - x1, 0.5);
   const baseHeight = Math.max(y2 - y1, 0.5);
@@ -923,13 +954,15 @@ function GeometryPreview({ elements, selectedId, onSelect }: { elements: Detecte
   const viewBox = `${centerX - viewWidth / 2 - pad} ${-(centerY + viewHeight / 2 + pad)} ${viewWidth + pad * 2} ${viewHeight + pad * 2}`;
 
   return <div className="drawing">
+    <div className="drawing-scope">{mode === "all" ? "Tüm kaynaklar" : mode === "selected" ? "Seçili eleman" : "Aktif pafta"}<span>{visibleElements.length}/{drawingElements.length}</span></div>
     <div className="drawing-controls">
       <button title="Uzaklaştır" onClick={() => setZoom((value) => Math.max(0.5, value / 1.35))}><ZoomOut size={15} /></button>
       <button title="Yakınlaştır" onClick={() => setZoom((value) => Math.min(12, value * 1.35))}><ZoomIn size={15} /></button>
-      <button title="Seçili elemana odaklan" className={focusSelected ? "active" : ""} disabled={!selected?.geometry.bbox} onClick={() => { setFocusSelected((value) => !value); setZoom(1); }}><Focus size={15} /></button>
-      <button title="Tümünü göster" onClick={() => { setFocusSelected(false); setZoom(1); }}>1:1</button>
+      <button title="Seçili elemana odaklan" className={mode === "selected" ? "active" : ""} disabled={!selectedDrawing?.geometry.bbox} onClick={() => { setMode("selected"); setZoom(1); }}><Focus size={15} /></button>
+      <button title="Seçili elemanın bulunduğu paftayı göster" className={`text ${mode === "context" ? "active" : ""}`} onClick={() => { setMode("context"); setZoom(1); }}>Pafta</button>
+      <button title="Bütün kaynak geometrilerini göster" className={`text ${mode === "all" ? "active" : ""}`} onClick={() => { setMode("all"); setZoom(1); }}>Tümü</button>
     </div>
-    <svg viewBox={viewBox} preserveAspectRatio="xMidYMid meet">{drawingElements.map((element) => {
+    <svg viewBox={viewBox} preserveAspectRatio="xMidYMid meet">{visibleElements.map((element) => {
       const points = element.geometry.points;
       const box = element.geometry.bbox;
       const coords = points.length > 1
@@ -938,6 +971,7 @@ function GeometryPreview({ elements, selectedId, onSelect }: { elements: Detecte
       return coords && <polyline key={element.id} points={coords} className={`${element.review_status} ${selectedId === element.id ? "selected" : ""}`} vectorEffect="non-scaling-stroke" onClick={() => onSelect(element.id)} />;
     })}</svg>
     {drawingElements.length === 0 && <div className="drawing-empty">Analiz sonrası geometri burada görünür.</div>}
+    {drawingElements.length > 0 && visibleElements.length === 0 && <div className="drawing-empty">Bu kayıtta çizilebilir plan geometrisi yok.</div>}
   </div>;
 }
 
