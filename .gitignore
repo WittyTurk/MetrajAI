@@ -21,6 +21,7 @@ node_modules/
 desktop/dist/
 desktop/src-tauri/target/
 local-releases/
+reference-data/
 desktop/src-tauri/binaries/metrajai-engine*
 desktop/src-tauri/resources/report-runtime/node*
 desktop/src-tauri/resources/report-runtime/node_modules/

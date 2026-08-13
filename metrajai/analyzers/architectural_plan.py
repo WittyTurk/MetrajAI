@@ -5,6 +5,7 @@ import math
 import re
 from dataclasses import dataclass
 from statistics import median
+from typing import Any
 
 from ezdxf import bbox
 from ezdxf.math import area as polygon_area
@@ -38,7 +39,7 @@ AREA_LABEL = re.compile(r"(?P<area>\d+(?:[.,]\d+)?)\s*M(?:2|²)", re.IGNORECASE)
 
 @dataclass(frozen=True)
 class _FlatEntity:
-    entity: object
+    entity: Any
     path: str
     inherited_layer: str
     block_name: str = ""
@@ -640,13 +641,13 @@ def extract_architectural_plan(
     for item, box in usable:
         if excluded(box) or item.entity.dxftype() not in {"INSERT", "ARC"}:
             continue
-        signature = _normalize(f"{item.layer} {item.block_name}")
-        if any(token in signature for token in EXCLUDED_TOKENS):
+        opening_signature = _normalize(f"{item.layer} {item.block_name}")
+        if any(token in opening_signature for token in EXCLUDED_TOKENS):
             continue
         element_type = ""
-        if any(token in signature for token in DOOR_TOKENS):
+        if any(token in opening_signature for token in DOOR_TOKENS):
             element_type = "door"
-        elif any(token in signature for token in WINDOW_TOKENS):
+        elif any(token in opening_signature for token in WINDOW_TOKENS):
             element_type = "window"
         if not element_type:
             continue

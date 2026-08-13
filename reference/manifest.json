@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "cache_directory": "reference-data",
+  "generated_by": "MetrajAI reference laboratory",
+  "datasets": [
+    {
+      "id": "pcert",
+      "name": "buildingSMART PCERT Sample Scene",
+      "source_page": "https://github.com/buildingSMART/Sample-Test-Files/tree/cecf656112a54a0d8cdd8b06b9398bfea5163886/IFC%204.0.2.1%20%28IFC%204%29/PCERT-Sample-Scene",
+      "commit": "cecf656112a54a0d8cdd8b06b9398bfea5163886",
+      "license": "CC-BY-4.0",
+      "attribution": "buildingSMART International Ltd., PCERT Sample Scene",
+      "clean_tolerance_ratio": 0.001,
+      "sources": [
+        {
+          "id": "pcert-architecture",
+          "discipline": "architectural",
+          "filename": "Building-Architecture.ifc",
+          "url": "https://raw.githubusercontent.com/buildingSMART/Sample-Test-Files/cecf656112a54a0d8cdd8b06b9398bfea5163886/IFC%204.0.2.1%20(IFC%204)/PCERT-Sample-Scene/Building-Architecture.ifc",
+          "sha256": "3ff9b10bd00c7b96dded51e7ca5a6b69efbea38b049adcdd05fcd247de7e70d5",
+          "size_bytes": 225635
+        },
+        {
+          "id": "pcert-structural",
+          "discipline": "structural",
+          "filename": "Building-Structural.ifc",
+          "url": "https://raw.githubusercontent.com/buildingSMART/Sample-Test-Files/cecf656112a54a0d8cdd8b06b9398bfea5163886/IFC%204.0.2.1%20(IFC%204)/PCERT-Sample-Scene/Building-Structural.ifc",
+          "sha256": "68be722391e7aaa53bb9278645a02aa4b6382f13cc07548a1612e9b1dc3def67",
+          "size_bytes": 296640
+        }
+      ]
+    },
+    {
+      "id": "clinic",
+      "name": "Medical-Dental Clinic",
+      "source_page": "https://github.com/buildingsmart-community/Community-Sample-Test-Files/tree/7ddf57a201f88a0c213d5322b02ed15e94a60a40/IFC%202.3.0.1%20%28IFC%202x3%29/Medical-Dental%20Clinic",
+      "commit": "7ddf57a201f88a0c213d5322b02ed15e94a60a40",
+      "license": "CC-BY-4.0",
+      "attribution": "BSI (2020) Medical-Dental Test Files, buildingSMART International",
+      "clean_tolerance_ratio": 0.01,
+      "sources": [
+        {
+          "id": "clinic-architecture",
+          "discipline": "architectural",
+          "filename": "Clinic_Architectural.ifc",
+          "url": "https://media.githubusercontent.com/media/buildingsmart-community/Community-Sample-Test-Files/7ddf57a201f88a0c213d5322b02ed15e94a60a40/IFC%202.3.0.1%20(IFC%202x3)/Medical-Dental%20Clinic/Clinic_Architectural.ifc",
+          "sha256": "2ac970ce065ecac4e0c9e5f453a257169e90d0067f419b7e33533a64ef837880",
+          "size_bytes": 13003205
+        },
+        {
+          "id": "clinic-structural",
+          "discipline": "structural",
+          "filename": "Clinic_Structural.ifc",
+          "url": "https://media.githubusercontent.com/media/buildingsmart-community/Community-Sample-Test-Files/7ddf57a201f88a0c213d5322b02ed15e94a60a40/IFC%202.3.0.1%20(IFC%202x3)/Medical-Dental%20Clinic/Clinic_Structural.ifc",
+          "sha256": "325287b375f154dc79504c4bbf67b40c501f458f23a8c4ba13b27171e00533d8",
+          "size_bytes": 19058175
+        }
+      ]
+    }
+  ]
+}

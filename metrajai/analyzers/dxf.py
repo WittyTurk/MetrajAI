@@ -32,6 +32,7 @@ from .multiview_structural import (
     extract_multiview_structural_plans,
     filter_multiview_generic_elements,
 )
+from .reference_dxf import extract_reference_dxf
 from .structural_plan import extract_structural_plans
 
 
@@ -261,6 +262,15 @@ class DxfAnalyzer:
             scale: float | None = None
         else:
             scale = unit_scale(chosen_unit)
+
+        reference_elements, reference_warnings, reference_activated = extract_reference_dxf(
+            document,
+            source,
+            chosen_unit,
+        )
+        if reference_activated:
+            warnings.extend(reference_warnings)
+            return reference_elements, warnings, detected_unit
 
         if source.discipline == Discipline.ARCHITECTURAL:
             warnings.append(

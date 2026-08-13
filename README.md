@@ -106,6 +106,31 @@ npm ci
 npm run build
 ```
 
+### IFC/DXF doğrulama laboratuvarı
+
+IFC, masaüstü uygulamasının kullanıcı dosya formatı değildir. Yalnız geliştirme
+doğrulamasında, açık lisanslı kaynaktan kontrollü DXF ve eleman bazlı altın sonuç
+üretmek için kullanılır. Büyük kaynaklar ile türetilmiş dosyalar Git'e alınmaz.
+
+```bash
+.venv/bin/python -m pip install -e '.[reference]'
+.venv/bin/python scripts/reference_dataset.py fetch --dataset pcert
+.venv/bin/python scripts/reference_dataset.py build --dataset pcert
+.venv/bin/python scripts/reference_dataset.py validate --dataset pcert
+```
+
+Komutlar `pcert`, `clinic` veya `all` veri setini kabul eder. Sabit commit, URL,
+SHA-256, CC BY 4.0 lisansı ve atıf bilgisi `reference/manifest.json` içindedir.
+Kaynak IFC'ler önce şema ve EXPRESS doğrulamasından geçer; doğrulama hatası, checksum
+farkı veya zorunlu geometri üretim hatası kapıyı durdurur. Temiz DXF'lere ek olarak
+kopya/döndürme/aynalama, iç içe blok, açık polyline, bulge, boşluklu hatch, uzak
+geometri ve yanlış/eksik birim içeren kontrollü zor dosyalar oluşturulur.
+
+PCERT kapısı desteklenen elemanların GlobalId eşleşmesi ve ölçü toleransıyla geçer.
+Kaynak Medical–Dental Clinic IFC'leri mevcut sabit committe resmî doğrulayıcıdan
+geçmediği için Clinic ve v1.2 paketleme kapısı bilinçli olarak kapalı kalır; ayrıntı
+`reference-data/generated/clinic/ifc-validation.json` dosyasına yazılır.
+
 ### macOS masaüstü penceresi
 
 Tauri masaüstü uygulaması bir Xcode projesi değildir; Xcode/Command Line Tools macOS
