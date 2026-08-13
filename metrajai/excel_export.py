@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from .report_xlsx import export_openpyxl_report
 from .reporting import build_report_payload
 from .workspace import ProjectWorkspace
 
@@ -21,21 +22,18 @@ def export_traceable_excel(
     """Export through artifact-tool in an isolated, disposable work directory."""
     node_binary = os.environ.get("METRAJAI_NODE_BINARY")
     node_modules = os.environ.get("METRAJAI_ARTIFACT_NODE_MODULES")
-    if not node_binary or not node_modules:
-        raise ExcelRuntimeUnavailable(
-            "Excel runtime is not configured. METRAJAI_NODE_BINARY and "
-            "METRAJAI_ARTIFACT_NODE_MODULES are required."
-        )
-    node_path = Path(node_binary).expanduser().resolve()
-    modules_path = Path(node_modules).expanduser().resolve()
-    if not node_path.is_file() or not (modules_path / "@oai" / "artifact-tool").exists():
-        raise ExcelRuntimeUnavailable("Configured artifact-tool runtime is incomplete.")
-
     target = (
         Path(output).expanduser().resolve()
         if output
         else workspace.exports_dir / f"{workspace.manifest.name}_Metraj.xlsx"
     )
+    if not node_binary or not node_modules:
+        return export_openpyxl_report(workspace, target)
+    node_path = Path(node_binary).expanduser().resolve()
+    modules_path = Path(node_modules).expanduser().resolve()
+    if not node_path.is_file() or not (modules_path / "@oai" / "artifact-tool").exists():
+        raise ExcelRuntimeUnavailable("Configured artifact-tool runtime is incomplete.")
+
     target.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="metrajai-report-") as temp_name:
         temp = Path(temp_name)

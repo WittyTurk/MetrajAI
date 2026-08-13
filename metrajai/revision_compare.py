@@ -9,11 +9,32 @@ from pydantic import BaseModel, Field
 
 from .contracts import DetectedElement, SourceFile
 
-COMPARABLE_TYPES = {"column", "beam", "slab"}
+COMPARABLE_TYPES = {
+    "column",
+    "beam",
+    "slab",
+    "shear_wall",
+    "raft",
+    "foundation",
+    "stair",
+    "slab_opening",
+}
 MEASUREMENT_KEYS = {
     "column": ("width_m", "depth_m", "height_m"),
     "beam": ("length_m", "width_m", "height_m"),
     "slab": ("area_m2", "thickness_m", "void_area_m2"),
+    "shear_wall": ("length_m", "thickness_m", "height_m", "void_area_m2"),
+    "raft": ("area_m2", "perimeter_m", "thickness_m", "void_area_m2"),
+    "foundation": ("area_m2", "perimeter_m", "thickness_m", "void_area_m2"),
+    "stair": (
+        "plan_area_m2",
+        "horizontal_run_m",
+        "total_rise_m",
+        "waist_thickness_m",
+        "step_volume_m3",
+        "landing_volume_m3",
+    ),
+    "slab_opening": ("area_m2", "perimeter_m"),
 }
 
 
@@ -226,7 +247,7 @@ def compare_revisions(
     warnings: list[str] = []
     if not old_elements or not new_elements:
         warnings.append(
-            "Kaynaklardan en az birinde karşılaştırılabilir kolon, kiriş veya döşeme tespiti yok."
+            "Kaynaklardan en az birinde karşılaştırılabilir taşıyıcı eleman tespiti yok."
         )
     low_confidence = sum(
         item.match_method == "translated_geometry" and item.match_confidence < 0.8

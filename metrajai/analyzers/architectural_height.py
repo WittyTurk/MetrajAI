@@ -186,18 +186,23 @@ def apply_architectural_heights(
     elements: list[DetectedElement],
     evidence: list[ArchitecturalHeightEvidence],
 ) -> tuple[list[DetectedElement], int]:
-    unique_heights = {round(item.height_m, 4) for item in evidence}
-    if len(unique_heights) != 1:
-        return elements, 0
-
     applied = 0
     for element in elements:
-        if element.discipline != Discipline.STRUCTURAL:
-            continue
-        if element.element_type not in {"column", "shear_wall"}:
+        supported = (
+            element.discipline == Discipline.STRUCTURAL
+            and element.element_type in {"column", "shear_wall"}
+        ) or (
+            element.discipline == Discipline.ARCHITECTURAL
+            and element.element_type == "wall"
+        )
+        if not supported:
             continue
         matching = [item for item in evidence if _floor_matches(element, item)]
         if not matching:
+            continue
+        matching_heights = {round(item.height_m, 4) for item in matching}
+        if len(matching_heights) != 1:
+            element.issues.append("review:architectural_height_evidence_ambiguous")
             continue
         item = matching[0]
         current = element.measurements.get("height_m")

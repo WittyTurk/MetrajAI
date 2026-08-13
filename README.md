@@ -43,7 +43,8 @@ pilot.metrajai/
 ├── sources/       # SHA-256 isimli, değiştirilmeyen kaynak kopyaları
 ├── cache/
 ├── exports/
-└── logs/          # JSONL tanılama kayıtları
+├── logs/          # JSONL tanılama kayıtları
+└── backups/       # şema geçişi ve kullanıcı yedekleri
 ```
 
 ## Yerel geliştirme
@@ -81,6 +82,14 @@ metrajai review ./pilot.metrajai elm_... accepted \
   --reviewer "Mühendis" --reason "K01 kesiti" --set height_m=3.0
 metrajai quantities ./pilot.metrajai
 metrajai compare-revisions ./pilot.metrajai src_eski src_yeni
+metrajai add-floor ./pilot.metrajai "2. KAT" --kind typical --order 2 \
+  --elevation 3.20 --height 3.20
+metrajai add-repeat ./pilot.metrajai src_... --scope template --template M1 \
+  --floor-id flr_... --reviewer "Mühendis" --reason "Kat listesi kontrol edildi"
+metrajai import-catalog ./pilot.metrajai ./birim-fiyat.xlsx \
+  --name "2026 Birim Fiyatları" --year 2026 --version 1 --currency TRY
+metrajai suggest-prices ./pilot.metrajai
+metrajai backup ./pilot.metrajai --reason "Teklif öncesi"
 ```
 
 Yerel API dış ağa bağlanmaz:
@@ -104,14 +113,16 @@ derleme altyapısını sağlar. Rust kurulduktan sonra gerçek yerel pencereyi a
 
 ```bash
 cd /Users/karakus/Documents/ChatGPT/MetrajAI
+.venv/bin/python scripts/build_macos_ocr.py
 .venv/bin/python scripts/package_sidecar.py  # motor değiştiğinde bir kez
 npm --prefix desktop run tauri dev
 ```
 
 Tauri derlemesi Rust araç zinciri gerektirir. `scripts/package_sidecar.py` Python
-motorunu hedef platform sidecar adına paketler. Excel çalışma zamanı özel dağıtım
-paketinde `scripts/stage_report_runtime.py` ile Tauri kaynaklarına alınır. Windows ve
-macOS paketleri ayrı GitHub Actions işlerinde üretilir.
+motorunu hedef platform sidecar adına paketler. `scripts/build_macos_ocr.py`, taranmış
+PDF metnini cihazda okuyan Apple Vision yardımcısını derler. Excel raporu paket içindeki
+Python çalışma zamanıyla çevrimdışı üretilebilir; geliştirme ortamında isteğe bağlı
+artifact-tool doğrulama yolu da desteklenir. Bu pilot yalnız macOS için paketlenir.
 
 ## Test kapsamı
 
@@ -132,18 +143,22 @@ Yeni test paketi aşağıdaki riskleri kapsar:
 - doğrudan çizilmiş kirişlerde çift kenar + kesit etiketi eşleştirmesi,
 - döşeme etiketi + çevreleyen gerçek kiriş yüzlerinden panel alanı,
 - DXF başlığı ile fiziksel kesit kanıtı çeliştiğinde birim uyuşmazlığı engeli,
-- kolon, kiriş ve döşeme DXF revizyon karşılaştırması.
+- kolon, kiriş, döşeme, perde, temel, merdiven ve boşluk revizyon karşılaştırması,
+- sürümlü SQLite geçişi ve geçiş öncesi tutarlı proje yedeği,
+- pafta/şablon/eleman kapsamlı onaylı tekrar ataması,
+- XLS/XLSX mahal ve poz listeleri, PDF ölçek kapısı ve cihaz-içi OCR kanıtı,
+- Decimal tabanlı fiyat eşleştirme, sıralı teklif oranları ve Excel uzlaşması.
 
 Gerçek proje paftaları Git'e eklenmez. Taziye Evi altın referansı, mühendis onaylı
 eleman ve manuel kontrol toplamları sağlandığında özel test alanında oluşturulacaktır.
 
 ## Durum
 
-Bu sürüm güvenilir çekirdeği, yerel API/CLI'ı, masaüstü pilot arayüzünü, kat/pafta
-yönetimini, kullanıcı kontrollü tip-kat tekrarını, statik revizyon karşılaştırmasını
-ve altı sayfalı izlenebilir Excel raporunu içerir. Defterdarlık güvenlik regresyonu
-çalışmaktadır. Sütçüler'in tek DXF içindeki kotlu paftaları ayrıştırılır; kiriş ve
-döşeme adayları gerçek çizgi/etiket kanıtıyla kat bazında mühendis onayına sunulur.
-Altın referans tamamlanmadan bu adaylar otomatik olarak kesin metraja girmez.
+1.0 macOS pilotu; güvenilir çekirdek, yerel API/CLI, kat/pafta ve kontrollü tekrar,
+genişletilmiş statik revizyon, mimari/peyzaj inceleme hattı, deneysel mekanik-elektrik
+kapıları, fiyat/teklif modeli ve on sayfalı formüllü Excel raporunu içerir. Taranmış
+PDF OCR'ı cihazdan çıkmaz. Taziye, Defterdarlık ve Sütçüler altın referans onayları
+tamamlanmadan disiplinler `reliable` durumuna geçirilemez; mekanik ve elektrik kesin
+metrajı küçük ve karmaşık gerçek proje doğrulamasına kadar kilitli kalır.
 
 Copyright © 2026. All rights reserved.

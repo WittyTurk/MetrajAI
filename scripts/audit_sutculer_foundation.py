@@ -221,7 +221,10 @@ def main() -> None:
     print("\nFOUNDATION OUTLINE VERTEX SIGNATURES")
     for outline in sorted(foundation_outlines, key=lambda row: row[6][0]):
         entity = next(item for item in entities if str(item.dxf.handle) == outline[2])
-        points = [(float(point[0]) * scale, float(point[1]) * scale) for point in entity.get_points("xy")]
+        points = [
+            (float(point[0]) * scale, float(point[1]) * scale)
+            for point in entity.get_points("xy")
+        ]
         min_x = min(point[0] for point in points)
         min_y = min(point[1] for point in points)
         signature = [(round(x - min_x, 3), round(y - min_y, 3)) for x, y in points]

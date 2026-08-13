@@ -1,5 +1,9 @@
 # Prefer `python -m pip install -e '.[dev]'` for development.
 ezdxf>=1.4,<2
 fastapi>=0.115,<1
+openpyxl>=3.1,<4
+pdfplumber>=0.11,<1
 pydantic>=2.10,<3
+pypdf>=5,<7
 uvicorn>=0.34,<1
+xlrd>=2.0,<3

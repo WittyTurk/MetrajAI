@@ -1,8 +1,20 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from decimal import Decimal
 
+from .commercial import calculate_offer
 from .workspace import ProjectWorkspace
+
+
+def _json_value(value):
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _json_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_value(item) for item in value]
+    return value
 
 
 def build_report_payload(workspace: ProjectWorkspace) -> dict:
@@ -11,11 +23,29 @@ def build_report_payload(workspace: ProjectWorkspace) -> dict:
     quantities = workspace.list_quantities()
     assumptions = workspace.list_assumptions()
     warnings = workspace.list_warnings()
+    price_items = workspace.list_price_items()
+    price_mappings = workspace.list_price_mappings()
+    offer_scenarios = workspace.list_offer_scenarios()
+    offers: list[dict] = []
+    for scenario in offer_scenarios:
+        lines, offer_totals = calculate_offer(
+            scenario,
+            quantities,
+            price_mappings,
+            price_items,
+        )
+        offers.append(
+            {
+                "scenario": scenario.model_dump(mode="json"),
+                "cost_lines": [item.model_dump(mode="json") for item in lines],
+                "totals": _json_value(offer_totals),
+            }
+        )
     totals: dict[tuple[str, str, str], float] = defaultdict(float)
     for line in quantities:
         totals[(line.discipline.value, line.category, line.unit)] += line.quantity
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "project": workspace.manifest.model_dump(mode="json"),
         "summary": [
             {
@@ -32,4 +62,26 @@ def build_report_payload(workspace: ProjectWorkspace) -> dict:
         "assumptions": [item.model_dump(mode="json") for item in assumptions],
         "warnings": [item.model_dump(mode="json") for item in warnings],
         "review_history": [item.model_dump(mode="json") for item in workspace.list_reviews()],
+        "floors": [item.model_dump(mode="json") for item in workspace.list_floors()],
+        "sheet_assignments": [
+            item.model_dump(mode="json") for item in workspace.list_sheet_assignments()
+        ],
+        "repeat_assignments": [
+            item.model_dump(mode="json") for item in workspace.list_repeat_assignments()
+        ],
+        "element_evidence": [
+            item.model_dump(mode="json") for item in workspace.list_element_evidence()
+        ],
+        "manual_overrides": [
+            item.model_dump(mode="json") for item in workspace.list_manual_overrides()
+        ],
+        "price_catalogs": [
+            item.model_dump(mode="json") for item in workspace.list_price_catalogs()
+        ],
+        "price_items": [item.model_dump(mode="json") for item in price_items],
+        "price_mappings": [item.model_dump(mode="json") for item in price_mappings],
+        "offers": offers,
+        "validation_gates": [
+            item.model_dump(mode="json") for item in workspace.list_validation_gates()
+        ],
     }

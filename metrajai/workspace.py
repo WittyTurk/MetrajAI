@@ -5,28 +5,53 @@ import json
 import shutil
 import sqlite3
 from collections.abc import Iterable
+from datetime import UTC, datetime
 from pathlib import Path
 
+from .calculations import derive_element_measurements
 from .contracts import (
     AnalysisRun,
     AnalysisWarning,
     Assumption,
+    CalibrationStatus,
+    CostLine,
     DetectedElement,
     Discipline,
     DrawingUnit,
+    ElementEvidence,
+    FloorDefinition,
     FloorKind,
+    ManualOverride,
+    MappingStatus,
+    OfferScenario,
+    PriceCatalog,
+    PriceItem,
+    PriceMapping,
     ProjectManifest,
     QuantityLine,
+    ReliabilityState,
+    RepeatAssignment,
+    RepeatScope,
     ReviewDecision,
     ReviewStatus,
+    SheetAssignment,
     SheetKind,
     SourceFile,
+    SourceFormat,
+    ValidationGate,
     utc_now,
 )
 from .floor_management import infer_floor_kind, infer_sheet_kind, normalize_repeat_floors
 
 MANIFEST_NAME = "manifest.json"
 DATABASE_NAME = "project.metrajai.sqlite3"
+CURRENT_SCHEMA_VERSION = 2
+SUPPORTED_SOURCE_FORMATS = {
+    SourceFormat.DXF,
+    SourceFormat.XLSX,
+    SourceFormat.XLS,
+    SourceFormat.PDF,
+}
 
 
 def _safe_name(value: str) -> str:
@@ -40,6 +65,13 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _source_format(path: Path) -> SourceFormat:
+    try:
+        return SourceFormat(path.suffix.lower().removeprefix("."))
+    except ValueError:
+        return SourceFormat.UNKNOWN
 
 
 class ProjectWorkspace:
@@ -56,7 +88,15 @@ class ProjectWorkspace:
         self.cache_dir = self.root / "cache"
         self.exports_dir = self.root / "exports"
         self.logs_dir = self.root / "logs"
+        self.backups_dir = self.root / "backups"
+        self.backups_dir.mkdir(exist_ok=True)
+        previous_version = self.manifest.schema_version
+        if previous_version < CURRENT_SCHEMA_VERSION and self.database_path.exists():
+            self.create_backup(f"schema-v{previous_version}-to-v{CURRENT_SCHEMA_VERSION}")
         self._init_database()
+        if previous_version < CURRENT_SCHEMA_VERSION:
+            self.manifest.schema_version = CURRENT_SCHEMA_VERSION
+            self.save_manifest()
 
     @classmethod
     def create(cls, root: str | Path, name: str) -> ProjectWorkspace:
@@ -65,7 +105,7 @@ class ProjectWorkspace:
         manifest_path = target / MANIFEST_NAME
         if manifest_path.exists():
             raise FileExistsError(f"A MetrajAI project already exists at {target}")
-        for folder in ("sources", "cache", "exports", "logs"):
+        for folder in ("sources", "cache", "exports", "logs", "backups"):
             (target / folder).mkdir(exist_ok=True)
         manifest = ProjectManifest(name=name)
         manifest_path.write_text(
@@ -139,8 +179,139 @@ class ProjectWorkspace:
                     data TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS warnings_run ON warnings(run_id);
+
+                CREATE TABLE IF NOT EXISTS schema_meta (
+                    version INTEGER NOT NULL,
+                    migrated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS floors (
+                    id TEXT PRIMARY KEY,
+                    floor_order INTEGER NOT NULL,
+                    data TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS floors_order ON floors(floor_order);
+
+                CREATE TABLE IF NOT EXISTS sheet_assignments (
+                    id TEXT PRIMARY KEY,
+                    source_id TEXT NOT NULL UNIQUE,
+                    data TEXT NOT NULL,
+                    FOREIGN KEY(source_id) REFERENCES sources(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS repeat_assignments (
+                    id TEXT PRIMARY KEY,
+                    source_id TEXT NOT NULL,
+                    approved INTEGER NOT NULL,
+                    data TEXT NOT NULL,
+                    FOREIGN KEY(source_id) REFERENCES sources(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS repeats_source ON repeat_assignments(source_id);
+
+                CREATE TABLE IF NOT EXISTS element_evidence (
+                    id TEXT PRIMARY KEY,
+                    element_id TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    data TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS evidence_element ON element_evidence(element_id);
+
+                CREATE TABLE IF NOT EXISTS manual_overrides (
+                    id TEXT PRIMARY KEY,
+                    element_id TEXT NOT NULL,
+                    data TEXT NOT NULL,
+                    FOREIGN KEY(element_id) REFERENCES elements(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS overrides_element ON manual_overrides(element_id);
+
+                CREATE TABLE IF NOT EXISTS price_catalogs (
+                    id TEXT PRIMARY KEY,
+                    data TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS price_items (
+                    id TEXT PRIMARY KEY,
+                    catalog_id TEXT NOT NULL,
+                    code TEXT NOT NULL,
+                    data TEXT NOT NULL,
+                    FOREIGN KEY(catalog_id) REFERENCES price_catalogs(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS price_items_catalog ON price_items(catalog_id);
+                CREATE INDEX IF NOT EXISTS price_items_code ON price_items(code);
+
+                CREATE TABLE IF NOT EXISTS price_mappings (
+                    id TEXT PRIMARY KEY,
+                    quantity_line_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    data TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS mappings_quantity ON price_mappings(quantity_line_id);
+
+                CREATE TABLE IF NOT EXISTS offer_scenarios (
+                    id TEXT PRIMARY KEY,
+                    approved INTEGER NOT NULL,
+                    data TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS cost_lines (
+                    id TEXT PRIMARY KEY,
+                    scenario_id TEXT NOT NULL,
+                    data TEXT NOT NULL,
+                    FOREIGN KEY(scenario_id) REFERENCES offer_scenarios(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS cost_lines_scenario ON cost_lines(scenario_id);
+
+                CREATE TABLE IF NOT EXISTS validation_gates (
+                    id TEXT PRIMARY KEY,
+                    discipline TEXT NOT NULL UNIQUE,
+                    state TEXT NOT NULL,
+                    data TEXT NOT NULL
+                );
                 """
             )
+            current = connection.execute(
+                "SELECT version FROM schema_meta ORDER BY rowid DESC LIMIT 1"
+            ).fetchone()
+            if current is None or int(current["version"]) != CURRENT_SCHEMA_VERSION:
+                connection.execute(
+                    "INSERT INTO schema_meta(version, migrated_at) VALUES (?, ?)",
+                    (CURRENT_SCHEMA_VERSION, utc_now().isoformat()),
+                )
+
+    def create_backup(self, reason: str = "manual") -> dict[str, str]:
+        """Create a consistent SQLite + manifest recovery point without touching sources."""
+        safe_reason = _safe_name(reason)[:60]
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+        folder = self.backups_dir / f"{stamp}_{safe_reason}"
+        folder.mkdir(parents=True, exist_ok=False)
+        if self.database_path.exists() and self.database_path.stat().st_size:
+            source = sqlite3.connect(self.database_path)
+            target = sqlite3.connect(folder / DATABASE_NAME)
+            try:
+                source.backup(target)
+            finally:
+                target.close()
+                source.close()
+        manifest_path = self.root / MANIFEST_NAME
+        if manifest_path.exists():
+            shutil.copy2(manifest_path, folder / MANIFEST_NAME)
+        metadata = {
+            "created_at": utc_now().isoformat(),
+            "reason": reason,
+            "schema_version": str(self.manifest.schema_version),
+        }
+        (folder / "backup.json").write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return {"path": str(folder), **metadata}
+
+    def list_backups(self) -> list[dict[str, str]]:
+        result: list[dict[str, str]] = []
+        for metadata_path in sorted(self.backups_dir.glob("*/backup.json"), reverse=True):
+            try:
+                item = json.loads(metadata_path.read_text("utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            result.append({"path": str(metadata_path.parent), **item})
+        return result
 
     def save_manifest(self) -> None:
         self.manifest.updated_at = utc_now()
@@ -165,6 +336,11 @@ class ProjectWorkspace:
         source_path = Path(path).expanduser().resolve()
         if not source_path.is_file():
             raise FileNotFoundError(source_path)
+        source_format = _source_format(source_path)
+        if source_format == SourceFormat.DWG:
+            raise ValueError("DWG macOS pilotunda desteklenmiyor; dosyayı DXF olarak kaydedin")
+        if source_format not in SUPPORTED_SOURCE_FORMATS:
+            raise ValueError("Desteklenen kaynak biçimleri: DXF, XLSX, XLS ve PDF")
         floor = floor.strip() or "GENEL"
         resolved_floor_kind = floor_kind or infer_floor_kind(floor, source_path.name, role)
         resolved_sheet_kind = sheet_kind or infer_sheet_kind(source_path.name, role)
@@ -199,6 +375,7 @@ class ProjectWorkspace:
             stored_path=str(destination.relative_to(self.root)),
             sha256=digest,
             size_bytes=source_path.stat().st_size,
+            source_format=source_format,
             discipline=discipline,
             role=role,
             floor=floor,
@@ -208,6 +385,11 @@ class ProjectWorkspace:
             revision=revision,
             drawing_unit=drawing_unit,
             unit_confirmed=drawing_unit != DrawingUnit.UNKNOWN,
+            calibration_status=(
+                CalibrationStatus.REQUIRED
+                if source_format == SourceFormat.PDF
+                else CalibrationStatus.NOT_REQUIRED
+            ),
         )
         with self._connect() as connection:
             connection.execute(
@@ -239,6 +421,13 @@ class ProjectWorkspace:
     @staticmethod
     def _source_with_inferred_mapping(data: str) -> SourceFile:
         source = SourceFile.model_validate_json(data)
+        if source.source_format == SourceFormat.UNKNOWN:
+            source.source_format = _source_format(Path(source.original_name))
+        if (
+            source.source_format == SourceFormat.PDF
+            and source.calibration_status == CalibrationStatus.NOT_REQUIRED
+        ):
+            source.calibration_status = CalibrationStatus.REQUIRED
         if source.sheet_kind == SheetKind.UNSPECIFIED:
             source.sheet_kind = infer_sheet_kind(source.original_name, source.role)
         if source.floor_kind == FloorKind.GENERAL:
@@ -262,6 +451,195 @@ class ProjectWorkspace:
         source.drawing_unit = unit
         source.unit_confirmed = unit != DrawingUnit.UNKNOWN
         return self.save_source(source)
+
+    def confirm_source_calibration(
+        self,
+        source_id: str,
+        *,
+        scale: float,
+        points: list[tuple[float, float]],
+    ) -> SourceFile:
+        source = self.get_source(source_id)
+        if source.source_format != SourceFormat.PDF:
+            raise ValueError("Kalibrasyon yalnız PDF kaynaklarında kullanılır")
+        if scale <= 0 or len(points) != 2:
+            raise ValueError("PDF kalibrasyonu için pozitif ölçek ve iki nokta gerekir")
+        source.calibration_scale = float(scale)
+        source.calibration_points = points
+        source.calibration_status = CalibrationStatus.CONFIRMED
+        return self.save_source(source)
+
+    def put_floor(self, floor: FloorDefinition) -> FloorDefinition:
+        if floor.project_id != self.manifest.project_id:
+            raise ValueError("Floor belongs to another project")
+        floor.name = floor.name.strip()
+        if not floor.name:
+            raise ValueError("Kat adı boş olamaz")
+        if floor.height_m is not None and floor.height_m <= 0:
+            raise ValueError("Kat yüksekliği pozitif olmalıdır")
+        floor.updated_at = utc_now()
+        with self._connect() as connection:
+            duplicate = connection.execute(
+                "SELECT id, data FROM floors WHERE id<>?", (floor.id,)
+            ).fetchall()
+            if any(
+                FloorDefinition.model_validate_json(row["data"]).name.casefold()
+                == floor.name.casefold()
+                for row in duplicate
+            ):
+                raise ValueError(f"Kat adı zaten kullanılıyor: {floor.name}")
+            connection.execute(
+                """
+                INSERT INTO floors(id, floor_order, data) VALUES (?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    floor_order=excluded.floor_order,
+                    data=excluded.data
+                """,
+                (floor.id, floor.order, floor.model_dump_json()),
+            )
+        return floor
+
+    def list_floors(self) -> list[FloorDefinition]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT data FROM floors ORDER BY floor_order, rowid"
+            ).fetchall()
+        return [FloorDefinition.model_validate_json(row["data"]) for row in rows]
+
+    def get_floor(self, floor_id: str) -> FloorDefinition:
+        with self._connect() as connection:
+            row = connection.execute("SELECT data FROM floors WHERE id=?", (floor_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown floor: {floor_id}")
+        return FloorDefinition.model_validate_json(row["data"])
+
+    def delete_floor(self, floor_id: str) -> None:
+        self.get_floor(floor_id)
+        assignments = self.list_sheet_assignments()
+        repeats = self.list_repeat_assignments()
+        if any(floor_id in item.floor_ids for item in assignments) or any(
+            floor_id in item.target_floor_ids for item in repeats
+        ):
+            raise ValueError("Kat bir pafta veya tekrar kararında kullanılıyor")
+        with self._connect() as connection:
+            connection.execute("DELETE FROM floors WHERE id=?", (floor_id,))
+
+    def put_sheet_assignment(self, assignment: SheetAssignment) -> SheetAssignment:
+        if assignment.project_id != self.manifest.project_id:
+            raise ValueError("Sheet assignment belongs to another project")
+        self.get_source(assignment.source_id)
+        for floor_id in assignment.floor_ids:
+            self.get_floor(floor_id)
+        if assignment.approved and (not assignment.reviewer.strip() or len(assignment.reason) < 3):
+            raise ValueError("Onaylı pafta eşlemesi için kullanıcı ve gerekçe zorunludur")
+        assignment.updated_at = utc_now()
+        with self._connect() as connection:
+            existing = connection.execute(
+                "SELECT id FROM sheet_assignments WHERE source_id=?", (assignment.source_id,)
+            ).fetchone()
+            if existing is not None:
+                assignment.id = existing["id"]
+            connection.execute(
+                """
+                INSERT INTO sheet_assignments(id, source_id, data) VALUES (?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET source_id=excluded.source_id, data=excluded.data
+                """,
+                (assignment.id, assignment.source_id, assignment.model_dump_json()),
+            )
+        return assignment
+
+    def list_sheet_assignments(self) -> list[SheetAssignment]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT data FROM sheet_assignments ORDER BY rowid"
+            ).fetchall()
+        return [SheetAssignment.model_validate_json(row["data"]) for row in rows]
+
+    def put_repeat_assignment(self, assignment: RepeatAssignment) -> RepeatAssignment:
+        if assignment.project_id != self.manifest.project_id:
+            raise ValueError("Repeat assignment belongs to another project")
+        self.get_source(assignment.source_id)
+        for floor_id in assignment.target_floor_ids:
+            self.get_floor(floor_id)
+        if assignment.scope == RepeatScope.ELEMENT:
+            if not assignment.element_ids:
+                raise ValueError("Eleman tekrarı için en az bir eleman seçin")
+            elements = [self.get_element(element_id) for element_id in assignment.element_ids]
+            if any(item.source_id != assignment.source_id for item in elements):
+                raise ValueError("Tekrarlanan elemanlar aynı kaynakta olmalıdır")
+        if assignment.scope == RepeatScope.TEMPLATE and not assignment.template_label.strip():
+            raise ValueError("Şablon tekrarı için M1, M2 gibi bir etiket gerekir")
+        if assignment.approved and (
+            not assignment.reviewer.strip() or len(assignment.reason.strip()) < 3
+        ):
+            raise ValueError("Onaylı kat tekrarı için kullanıcı ve gerekçe zorunludur")
+        assignment.target_floor_ids = list(dict.fromkeys(assignment.target_floor_ids))
+        assignment.element_ids = list(dict.fromkeys(assignment.element_ids))
+        assignment.updated_at = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO repeat_assignments(id, source_id, approved, data)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    source_id=excluded.source_id,
+                    approved=excluded.approved,
+                    data=excluded.data
+                """,
+                (
+                    assignment.id,
+                    assignment.source_id,
+                    int(assignment.approved),
+                    assignment.model_dump_json(),
+                ),
+            )
+        return assignment
+
+    def list_repeat_assignments(
+        self, source_id: str | None = None
+    ) -> list[RepeatAssignment]:
+        query = "SELECT data FROM repeat_assignments"
+        params: tuple[str, ...] = ()
+        if source_id:
+            query += " WHERE source_id=?"
+            params = (source_id,)
+        query += " ORDER BY rowid"
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [RepeatAssignment.model_validate_json(row["data"]) for row in rows]
+
+    def delete_repeat_assignment(self, assignment_id: str) -> None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM repeat_assignments WHERE id=?", (assignment_id,)
+            )
+        if cursor.rowcount == 0:
+            raise KeyError(f"Unknown repeat assignment: {assignment_id}")
+
+    def replace_element_evidence(
+        self, element_id: str, evidence: Iterable[ElementEvidence]
+    ) -> None:
+        values = list(evidence)
+        with self._connect() as connection:
+            connection.execute("DELETE FROM element_evidence WHERE element_id=?", (element_id,))
+            connection.executemany(
+                "INSERT INTO element_evidence(id, element_id, source_id, data) VALUES (?, ?, ?, ?)",
+                [
+                    (item.id, item.element_id, item.source_id, item.model_dump_json())
+                    for item in values
+                ],
+            )
+
+    def list_element_evidence(self, element_id: str | None = None) -> list[ElementEvidence]:
+        query = "SELECT data FROM element_evidence"
+        params: tuple[str, ...] = ()
+        if element_id:
+            query += " WHERE element_id=?"
+            params = (element_id,)
+        query += " ORDER BY rowid"
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [ElementEvidence.model_validate_json(row["data"]) for row in rows]
 
     def update_source_discipline(
         self,
@@ -406,6 +784,20 @@ class ProjectWorkspace:
                 ]
                 if element_ids:
                     marks = ",".join("?" for _ in element_ids)
+                    quantity_ids = [
+                        row["id"]
+                        for row in connection.execute(
+                            f"SELECT id FROM quantity_lines WHERE element_id IN ({marks})",
+                            element_ids,
+                        ).fetchall()
+                    ]
+                    if quantity_ids:
+                        quantity_marks = ",".join("?" for _ in quantity_ids)
+                        connection.execute(
+                            "DELETE FROM price_mappings WHERE quantity_line_id IN "
+                            f"({quantity_marks})",
+                            quantity_ids,
+                        )
                     connection.execute(
                         f"DELETE FROM quantity_lines WHERE element_id IN ({marks})", element_ids
                     )
@@ -413,6 +805,9 @@ class ProjectWorkspace:
                         f"DELETE FROM reviews WHERE element_id IN ({marks})", element_ids
                     )
                     connection.execute(f"DELETE FROM elements WHERE id IN ({marks})", element_ids)
+                    connection.execute("DELETE FROM cost_lines")
+
+                connection.execute("DELETE FROM element_evidence WHERE source_id=?", (source_id,))
 
                 warning_ids = [
                     row["id"]
@@ -470,6 +865,9 @@ class ProjectWorkspace:
                     f"DELETE FROM quantity_lines WHERE element_id IN ({marks})", stale_ids
                 )
                 connection.execute(f"DELETE FROM reviews WHERE element_id IN ({marks})", stale_ids)
+                connection.execute(
+                    f"DELETE FROM element_evidence WHERE element_id IN ({marks})", stale_ids
+                )
                 connection.execute(f"DELETE FROM elements WHERE id IN ({marks})", stale_ids)
 
             decisions_by_element: dict[str, list[ReviewDecision]] = {}
@@ -488,6 +886,7 @@ class ProjectWorkspace:
                     element.measurements.update(decision.measurement_overrides)
                     element.review_status = decision.status
                     element.updated_at = decision.created_at
+                derive_element_measurements(element)
                 if element.review_status == ReviewStatus.ACCEPTED and element.missing_inputs():
                     element.review_status = ReviewStatus.NEEDS_REVIEW
                     element.issues.append("previous_acceptance_invalid_after_reanalysis")
@@ -548,10 +947,16 @@ class ProjectWorkspace:
 
     def review_element(self, decision: ReviewDecision) -> DetectedElement:
         element = self.get_element(decision.element_id)
+        old_values: dict[str, float] = {}
+        if decision.measurement_overrides and len(decision.reason.strip()) < 3:
+            raise ValueError("Elle girilen ölçü için en az 3 karakterlik gerekçe zorunludur")
         for key, value in decision.measurement_overrides.items():
             if value < 0:
                 raise ValueError(f"Measurement cannot be negative: {key}")
+            if key in element.measurements:
+                old_values[key] = float(element.measurements[key])
             element.measurements[key] = float(value)
+        derive_element_measurements(element)
         if decision.status == ReviewStatus.ACCEPTED:
             blocking_issues = [
                 issue.removeprefix("blocking:")
@@ -575,6 +980,22 @@ class ProjectWorkspace:
                 "INSERT INTO reviews(id, element_id, data) VALUES (?, ?, ?)",
                 (decision.id, decision.element_id, decision.model_dump_json()),
             )
+            if decision.measurement_overrides:
+                override = ManualOverride(
+                    element_id=element.id,
+                    reviewer=decision.reviewer,
+                    reason=decision.reason,
+                    old_values=old_values,
+                    new_values={
+                        key: float(value)
+                        for key, value in decision.measurement_overrides.items()
+                    },
+                    source_id=element.source_id,
+                )
+                connection.execute(
+                    "INSERT INTO manual_overrides(id, element_id, data) VALUES (?, ?, ?)",
+                    (override.id, element.id, override.model_dump_json()),
+                )
             connection.execute(
                 "UPDATE elements SET review_status=?, data=? WHERE id=?",
                 (element.review_status.value, element.model_dump_json(), element.id),
@@ -585,6 +1006,17 @@ class ProjectWorkspace:
         with self._connect() as connection:
             rows = connection.execute("SELECT data FROM reviews ORDER BY rowid").fetchall()
         return [ReviewDecision.model_validate_json(row["data"]) for row in rows]
+
+    def list_manual_overrides(self, element_id: str | None = None) -> list[ManualOverride]:
+        query = "SELECT data FROM manual_overrides"
+        params: tuple[str, ...] = ()
+        if element_id:
+            query += " WHERE element_id=?"
+            params = (element_id,)
+        query += " ORDER BY rowid"
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [ManualOverride.model_validate_json(row["data"]) for row in rows]
 
     def put_assumption(self, assumption: Assumption) -> Assumption:
         with self._connect() as connection:
@@ -736,17 +1168,262 @@ class ProjectWorkspace:
 
     def replace_quantities(self, quantities: Iterable[QuantityLine]) -> None:
         values = list(quantities)
+        valid_ids = {item.id for item in values}
         with self._connect() as connection:
             connection.execute("DELETE FROM quantity_lines")
             connection.executemany(
                 "INSERT INTO quantity_lines(id, element_id, data) VALUES (?, ?, ?)",
                 [(item.id, item.element_id, item.model_dump_json()) for item in values],
             )
+            mapping_rows = connection.execute(
+                "SELECT id, quantity_line_id FROM price_mappings"
+            ).fetchall()
+            stale_mapping_ids = [
+                row["id"] for row in mapping_rows if row["quantity_line_id"] not in valid_ids
+            ]
+            if stale_mapping_ids:
+                marks = ",".join("?" for _ in stale_mapping_ids)
+                connection.execute(
+                    f"DELETE FROM price_mappings WHERE id IN ({marks})", stale_mapping_ids
+                )
+            connection.execute("DELETE FROM cost_lines")
 
     def list_quantities(self) -> list[QuantityLine]:
         with self._connect() as connection:
             rows = connection.execute("SELECT data FROM quantity_lines ORDER BY rowid").fetchall()
         return [QuantityLine.model_validate_json(row["data"]) for row in rows]
+
+    def put_price_catalog(
+        self, catalog: PriceCatalog, items: Iterable[PriceItem]
+    ) -> PriceCatalog:
+        if catalog.project_id != self.manifest.project_id:
+            raise ValueError("Price catalog belongs to another project")
+        values = list(items)
+        if any(item.catalog_id != catalog.id for item in values):
+            raise ValueError("All price items must belong to the catalog")
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO price_catalogs(id, data) VALUES (?, ?)",
+                (catalog.id, catalog.model_dump_json()),
+            )
+            connection.execute("DELETE FROM price_items WHERE catalog_id=?", (catalog.id,))
+            connection.executemany(
+                "INSERT INTO price_items(id, catalog_id, code, data) VALUES (?, ?, ?, ?)",
+                [
+                    (item.id, item.catalog_id, item.code, item.model_dump_json())
+                    for item in values
+                ],
+            )
+        return catalog
+
+    def store_catalog_source(self, path: str | Path, sha256: str) -> str:
+        source_path = Path(path).expanduser().resolve()
+        if not source_path.is_file() or _sha256(source_path) != sha256:
+            raise ValueError("Fiyat kataloğu bütünlüğü doğrulanamadı")
+        folder = self.sources_dir / "catalogs"
+        folder.mkdir(exist_ok=True)
+        destination = folder / f"{sha256[:12]}_{_safe_name(source_path.name)}"
+        if not destination.exists():
+            shutil.copy2(source_path, destination)
+        return str(destination.relative_to(self.root))
+
+    def list_price_catalogs(self) -> list[PriceCatalog]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT data FROM price_catalogs ORDER BY rowid").fetchall()
+        return [PriceCatalog.model_validate_json(row["data"]) for row in rows]
+
+    def get_price_item(self, item_id: str) -> PriceItem:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT data FROM price_items WHERE id=?", (item_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown price item: {item_id}")
+        return PriceItem.model_validate_json(row["data"])
+
+    def list_price_items(self, catalog_id: str | None = None) -> list[PriceItem]:
+        query = "SELECT data FROM price_items"
+        params: tuple[str, ...] = ()
+        if catalog_id:
+            query += " WHERE catalog_id=?"
+            params = (catalog_id,)
+        query += " ORDER BY code, rowid"
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [PriceItem.model_validate_json(row["data"]) for row in rows]
+
+    def put_price_mapping(self, mapping: PriceMapping) -> PriceMapping:
+        if mapping.project_id != self.manifest.project_id:
+            raise ValueError("Price mapping belongs to another project")
+        quantity_ids = {line.id for line in self.list_quantities()}
+        if mapping.quantity_line_id not in quantity_ids:
+            raise KeyError(f"Unknown quantity line: {mapping.quantity_line_id}")
+        price_item = self.get_price_item(mapping.price_item_id)
+        quantity = next(
+            line for line in self.list_quantities() if line.id == mapping.quantity_line_id
+        )
+        if price_item.unit.casefold() != quantity.unit.casefold():
+            raise ValueError(
+                f"Birim uyuşmuyor: metraj {quantity.unit}, fiyat {price_item.unit}"
+            )
+        if mapping.status == MappingStatus.APPROVED and (
+            not mapping.reviewer.strip() or len(mapping.reason.strip()) < 3
+        ):
+            raise ValueError("Onaylı poz eşleştirmesi için kullanıcı ve gerekçe zorunludur")
+        mapping.updated_at = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM price_mappings WHERE quantity_line_id=? AND id<>?",
+                (mapping.quantity_line_id, mapping.id),
+            )
+            connection.execute(
+                """
+                INSERT INTO price_mappings(id, quantity_line_id, status, data)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    quantity_line_id=excluded.quantity_line_id,
+                    status=excluded.status,
+                    data=excluded.data
+                """,
+                (
+                    mapping.id,
+                    mapping.quantity_line_id,
+                    mapping.status.value,
+                    mapping.model_dump_json(),
+                ),
+            )
+        return mapping
+
+    def list_price_mappings(self) -> list[PriceMapping]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT data FROM price_mappings ORDER BY rowid").fetchall()
+        valid_quantities = {line.id for line in self.list_quantities()}
+        return [
+            mapping
+            for row in rows
+            if (mapping := PriceMapping.model_validate_json(row["data"])).quantity_line_id
+            in valid_quantities
+        ]
+
+    def put_offer_scenario(self, scenario: OfferScenario) -> OfferScenario:
+        if scenario.project_id != self.manifest.project_id:
+            raise ValueError("Offer scenario belongs to another project")
+        if scenario.currency != "TRY" and (
+            scenario.exchange_rate <= 0
+            or not scenario.exchange_rate_source.strip()
+            or not scenario.exchange_rate_date.strip()
+        ):
+            raise ValueError("Dövizli senaryo için kur, tarih ve kaynak zorunludur")
+        orders = [item.order for item in scenario.adjustments]
+        if len(orders) != len(set(orders)):
+            raise ValueError("Teklif ayarlamalarının sırası benzersiz olmalıdır")
+        if scenario.approved:
+            unresolved = [item.label for item in scenario.adjustments if item.applicable is None]
+            if unresolved:
+                raise ValueError(
+                    "Teklif onayı için uygulanır/uygulanmaz kararı eksik: "
+                    + ", ".join(unresolved)
+                )
+            if not scenario.reviewer.strip():
+                raise ValueError("Onaylı teklif senaryosu için kullanıcı zorunludur")
+        scenario.updated_at = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO offer_scenarios(id, approved, data) VALUES (?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET approved=excluded.approved, data=excluded.data
+                """,
+                (scenario.id, int(scenario.approved), scenario.model_dump_json()),
+            )
+        return scenario
+
+    def get_offer_scenario(self, scenario_id: str) -> OfferScenario:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT data FROM offer_scenarios WHERE id=?", (scenario_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown offer scenario: {scenario_id}")
+        return OfferScenario.model_validate_json(row["data"])
+
+    def list_offer_scenarios(self) -> list[OfferScenario]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT data FROM offer_scenarios ORDER BY rowid").fetchall()
+        return [OfferScenario.model_validate_json(row["data"]) for row in rows]
+
+    def replace_cost_lines(self, scenario_id: str, lines: Iterable[CostLine]) -> None:
+        values = list(lines)
+        with self._connect() as connection:
+            connection.execute("DELETE FROM cost_lines WHERE scenario_id=?", (scenario_id,))
+            connection.executemany(
+                "INSERT INTO cost_lines(id, scenario_id, data) VALUES (?, ?, ?)",
+                [(item.id, item.scenario_id, item.model_dump_json()) for item in values],
+            )
+
+    def list_cost_lines(self, scenario_id: str | None = None) -> list[CostLine]:
+        query = "SELECT data FROM cost_lines"
+        params: tuple[str, ...] = ()
+        if scenario_id:
+            query += " WHERE scenario_id=?"
+            params = (scenario_id,)
+        query += " ORDER BY rowid"
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [CostLine.model_validate_json(row["data"]) for row in rows]
+
+    def put_validation_gate(self, gate: ValidationGate) -> ValidationGate:
+        if gate.project_id != self.manifest.project_id:
+            raise ValueError("Validation gate belongs to another project")
+        if gate.state == ReliabilityState.RELIABLE and not (
+            gate.small_project_approved and gate.complex_project_approved
+        ):
+            raise ValueError("Güvenilir durum için küçük ve karmaşık proje onayı gerekir")
+        gate.updated_at = utc_now()
+        with self._connect() as connection:
+            existing = connection.execute(
+                "SELECT id FROM validation_gates WHERE discipline=?",
+                (gate.discipline.value,),
+            ).fetchone()
+            if existing is not None:
+                gate.id = existing["id"]
+            connection.execute(
+                """
+                INSERT INTO validation_gates(id, discipline, state, data)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    discipline=excluded.discipline,
+                    state=excluded.state,
+                    data=excluded.data
+                """,
+                (gate.id, gate.discipline.value, gate.state.value, gate.model_dump_json()),
+            )
+        return gate
+
+    def list_validation_gates(self) -> list[ValidationGate]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT data FROM validation_gates ORDER BY discipline"
+            ).fetchall()
+        stored = {
+            gate.discipline: gate
+            for row in rows
+            if (gate := ValidationGate.model_validate_json(row["data"]))
+        }
+        return [
+            stored.get(
+                discipline,
+                ValidationGate(
+                    project_id=self.manifest.project_id,
+                    discipline=discipline,
+                    state=(
+                        ReliabilityState.NEEDS_REVIEW
+                        if discipline in (Discipline.STRUCTURAL, Discipline.ARCHITECTURAL)
+                        else ReliabilityState.EXPERIMENTAL
+                    ),
+                ),
+            )
+            for discipline in Discipline
+        ]
 
     def save_run(self, run: AnalysisRun) -> None:
         with self._connect() as connection:
@@ -803,9 +1480,16 @@ class ProjectWorkspace:
         return {
             "project": self.manifest.model_dump(mode="json"),
             "source_count": len(self.list_sources()),
+            "floor_count": len(self.list_floors()),
+            "repeat_assignment_count": len(self.list_repeat_assignments()),
             "element_count": len(elements),
             "review_counts": counts,
             "quantity_count": len(self.list_quantities()),
+            "price_catalog_count": len(self.list_price_catalogs()),
+            "offer_scenario_count": len(self.list_offer_scenarios()),
+            "validation_gates": [
+                item.model_dump(mode="json") for item in self.list_validation_gates()
+            ],
         }
 
     def write_report_payload(self, payload: dict, output: str | Path | None = None) -> Path:

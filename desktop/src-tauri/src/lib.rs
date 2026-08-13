@@ -56,6 +56,10 @@ pub fn run() {
                     .env("METRAJAI_NODE_BINARY", node_binary)
                     .env("METRAJAI_ARTIFACT_NODE_MODULES", node_modules);
             }
+            let ocr_binary = app.path().resource_dir()?.join("resources/metrajai-ocr");
+            if ocr_binary.is_file() {
+                sidecar = sidecar.env("METRAJAI_OCR_BINARY", ocr_binary);
+            }
             let (mut receiver, child) = sidecar.spawn()?;
             if let Ok(mut slot) = app.state::<EngineState>().child.lock() {
                 *slot = Some(child);

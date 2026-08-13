@@ -9,7 +9,10 @@ if (!payloadPath || !outputPath) {
 const payload = JSON.parse(await fs.readFile(payloadPath, "utf8"));
 const workbook = Workbook.create();
 const sheets = Object.fromEntries(
-  ["Özet", "Kaynaklar", "Elemanlar", "Metraj", "Varsayımlar", "Uyarılar"].map(
+  [
+    "Özet", "Kaynaklar", "Elemanlar", "Metraj", "Varsayımlar", "Uyarılar",
+    "Poz Eşleştirme", "Birim Fiyatlar", "Teklif Senaryosu", "Teklif Özeti",
+  ].map(
     (name) => [name, workbook.worksheets.add(name)],
   ),
 );
@@ -60,7 +63,11 @@ function addTable(sheet, headerRow, headerValues, bodyValues, lastColumn) {
   sheet.freezePanes.freezeRows(headerRow);
 }
 
-const { sources, elements, quantities, assumptions, warnings, project } = payload;
+const {
+  sources, elements, quantities, assumptions, warnings, project,
+  price_catalogs: priceCatalogs = [], price_items: priceItems = [],
+  price_mappings: priceMappings = [], offers = [], validation_gates: validationGates = [],
+} = payload;
 
 {
   const sheet = sheets.Kaynaklar;
@@ -119,11 +126,15 @@ const assumptionRows = new Map();
   if (rows.length) sheet.getRange(`H5:H${rows.length + 4}`).format.numberFormat = "yyyy-mm-dd hh:mm";
 }
 
+const quantityRows = new Map();
 {
   const sheet = sheets.Metraj;
   addTitle(sheet, "METRAJ", "Yalnız onaylı elemanlar; sarı sütunlar hücre formülüdür", "V");
   const header = ["Metraj ID", "Disiplin", "Kat", "Kategori", "Açıklama", "Birim", "Eleman ID", "Kaynak ID", "Genişlik", "Derinlik", "Yükseklik", "Uzunluk", "Kalınlık", "Alan", "Çevre", "Adet", "Çap", "Net Donatı", "İlave %", "Miktar", "Formül Açıklaması", "Onay"];
-  addTable(sheet, 4, header, quantities.map((item) => [item.id, item.discipline, item.floor, item.category, item.description, item.unit, item.element_id, item.source_id, null, null, null, null, null, null, null, null, null, null, null, null, item.formula, item.review_status]), "V");
+  addTable(sheet, 4, header, quantities.map((item, index) => {
+    quantityRows.set(item.id, index + 5);
+    return [item.id, item.discipline, item.floor, item.category, item.description, item.unit, item.element_id, item.source_id, null, null, null, null, null, null, null, null, null, null, null, null, item.formula, item.review_status];
+  }), "V");
   const endRow = quantities.length + 4;
   quantities.forEach((item, index) => {
     const row = index + 5;
@@ -140,12 +151,15 @@ const assumptionRows = new Map();
     if (item.formula_key === "column:0") formula = `=I${row}*J${row}*K${row}`;
     else if (item.formula_key === "column:1") formula = `=2*(I${row}+J${row})*K${row}`;
     else if (item.formula_key === "beam:0") formula = `=I${row}*K${row}*L${row}`;
-    else if (item.formula_key === "beam:1") formula = `=(2*K${row}+I${row})*L${row}`;
+    else if (item.formula_key === "beam:1") formula = `=${Number(item.variables.formwork_area_m2)}`;
     else if (item.formula_key === "shear_wall:0") formula = `=M${row}*L${row}*K${row}`;
     else if (item.formula_key === "shear_wall:1") formula = `=2*L${row}*K${row}`;
-    else if (["slab:0", "raft:0"].includes(item.formula_key)) formula = `=N${row}*M${row}`;
+    else if (["slab:0", "raft:0", "foundation:0"].includes(item.formula_key)) formula = `=N${row}*M${row}`;
     else if (item.formula_key === "slab:1") formula = `=N${row}`;
-    else if (item.formula_key === "raft:1") formula = `=O${row}*M${row}`;
+    else if (["raft:1", "foundation:1"].includes(item.formula_key)) formula = `=O${row}*M${row}`;
+    else if (item.formula_key === "stair:0") formula = `=${Number(item.variables.plan_area_m2)}*SQRT(1+(${Number(item.variables.total_rise_m)}/${Number(item.variables.horizontal_run_m)})^2)*${Number(item.variables.waist_thickness_m)}`;
+    else if (item.formula_key === "stair:6") formula = `=${Number(item.variables.plan_area_m2)}*SQRT(1+(${Number(item.variables.total_rise_m)}/${Number(item.variables.horizontal_run_m)})^2)`;
+    else if (["stair:1", "stair:2", "stair:3", "stair:4", "stair:5"].includes(item.formula_key)) formula = `=${Number(item.quantity)}`;
     else if (item.formula_key === "rebar:0") formula = `=L${row}*P${row}*Q${row}^2/162`;
     else if (["rebar:1", "rebar:2", "rebar:3"].includes(item.formula_key)) {
       const assumptionKey = Object.keys(item.variables).find((key) => key.endsWith("_percent"));
@@ -156,9 +170,9 @@ const assumptionRows = new Map();
       formula = `=R${row}*S${row}/100`;
     } else if (["wall:0", "landscape_linear:0", "pipe:0", "duct:0", "cable:0", "cable_tray:0"].includes(item.formula_key)) formula = `=L${row}`;
     else if (item.formula_key === "wall:1") formula = `=L${row}*K${row}`;
-    else if (["room:0", "room:1", "landscape_area:0"].includes(item.formula_key)) formula = `=N${row}`;
+    else if (["room:0", "room:1", "landscape_area:0", "finish_area:0"].includes(item.formula_key)) formula = `=N${row}`;
     else if (item.formula_key === "room:2") formula = `=O${row}`;
-    else formula = `=P${row}`;
+    else formula = `=${Number(item.quantity)}`;
     sheet.getRange(`T${row}`).formulas = [[formula]];
   });
   [20, 13, 10, 13, 23, 9, 22, 22, 11, 11, 11, 11, 11, 11, 11, 9, 9, 13, 11, 14, 38, 12].forEach(
@@ -184,6 +198,131 @@ const assumptionRows = new Map();
   );
   if (rows.length) sheet.getRange(`C5:C${rows.length + 4}`).format.wrapText = true;
   if (rows.length) sheet.getRange(`G5:G${rows.length + 4}`).format.numberFormat = "yyyy-mm-dd hh:mm";
+}
+
+const catalogById = new Map(priceCatalogs.map((item) => [item.id, item]));
+const priceItemRows = new Map();
+{
+  const sheet = sheets["Birim Fiyatlar"];
+  addTitle(sheet, "BİRİM FİYATLAR", "Resmî ve özel katalogların sürümlü yerel kopyaları", "K");
+  const rows = priceItems.map((item, index) => {
+    priceItemRows.set(item.id, index + 5);
+    const catalog = catalogById.get(item.catalog_id) ?? {};
+    return [
+      item.id, item.catalog_id, catalog.name ?? "", catalog.year ?? "", item.code,
+      item.description, item.unit, Number(item.unit_price), item.currency,
+      catalog.sha256 ?? "", catalog.source_url ?? "",
+    ];
+  });
+  addTable(sheet, 4, ["Fiyat ID", "Katalog ID", "Katalog", "Yıl", "Poz", "Açıklama", "Birim", "Birim Fiyat", "Para Birimi", "Kaynak SHA-256", "Kaynak URL"], rows, "K");
+  [22, 22, 25, 9, 16, 60, 10, 16, 12, 44, 42].forEach(
+    (width, index) => sheet.getRangeByIndexes(0, index, Math.max(rows.length + 4, 5), 1).format.columnWidth = width,
+  );
+  if (rows.length) sheet.getRange(`H5:H${rows.length + 4}`).format.numberFormat = "#,##0.00";
+}
+
+const mappingRows = new Map();
+{
+  const sheet = sheets["Poz Eşleştirme"];
+  addTitle(sheet, "POZ EŞLEŞTİRME", "Mühendis onayı olmayan öneriler teklif toplamına girmez", "N");
+  const rows = priceMappings.map((item, index) => {
+    mappingRows.set(item.id, index + 5);
+    const price = priceItems.find((candidate) => candidate.id === item.price_item_id) ?? {};
+    return [
+      item.id, item.quantity_line_id, item.price_item_id, price.code ?? "", item.status,
+      item.confidence, item.reviewer, item.reason, null, null, null, null, null, null,
+    ];
+  });
+  addTable(sheet, 4, ["Eşleşme ID", "Metraj ID", "Fiyat ID", "Poz", "Durum", "Güven", "Onaylayan", "Gerekçe", "Miktar", "Metraj Birimi", "Birim Fiyat", "Fiyat Birimi", "Para Birimi", "Doğrudan Tutar"], rows, "N");
+  priceMappings.forEach((item, index) => {
+    const row = index + 5;
+    const quantityRow = quantityRows.get(item.quantity_line_id);
+    const priceRow = priceItemRows.get(item.price_item_id);
+    if (!quantityRow || !priceRow) return;
+    sheet.getRange(`I${row}`).formulas = [[`='Metraj'!T${quantityRow}`]];
+    sheet.getRange(`J${row}`).formulas = [[`='Metraj'!F${quantityRow}`]];
+    sheet.getRange(`K${row}`).formulas = [[`='Birim Fiyatlar'!H${priceRow}`]];
+    sheet.getRange(`L${row}`).formulas = [[`='Birim Fiyatlar'!G${priceRow}`]];
+    sheet.getRange(`M${row}`).formulas = [[`='Birim Fiyatlar'!I${priceRow}`]];
+    sheet.getRange(`N${row}`).formulas = [[`=IF(E${row}="approved",I${row}*K${row},0)`]];
+  });
+  [22, 22, 22, 16, 12, 10, 16, 40, 14, 13, 16, 13, 12, 18].forEach(
+    (width, index) => sheet.getRangeByIndexes(0, index, Math.max(rows.length + 4, 5), 1).format.columnWidth = width,
+  );
+  if (rows.length) {
+    sheet.getRange(`F5:F${rows.length + 4}`).format.numberFormat = "0%";
+    sheet.getRange(`I5:I${rows.length + 4}`).format.numberFormat = "#,##0.000";
+    sheet.getRange(`K5:K${rows.length + 4}`).format.numberFormat = "#,##0.00";
+    sheet.getRange(`N5:N${rows.length + 4}`).format = {
+      fill: "#FFF0D9", font: { bold: true, color: colors.ink }, numberFormat: "#,##0.00",
+    };
+  }
+}
+
+const scenarioAdjustmentRows = new Map();
+{
+  const sheet = sheets["Teklif Senaryosu"];
+  addTitle(sheet, "TEKLİF SENARYOSU", "Oran, sabit tutar ve endeks kalemleri açık sıra ile uygulanır", "O");
+  const rows = [];
+  for (const offer of offers) {
+    const scenario = offer.scenario;
+    for (const adjustment of [...scenario.adjustments].sort((a, b) => a.order - b.order)) {
+      const row = rows.length + 5;
+      scenarioAdjustmentRows.set(`${scenario.id}|${adjustment.id}`, row);
+      rows.push([
+        scenario.id, scenario.name, scenario.currency, Number(scenario.exchange_rate),
+        adjustment.order, adjustment.label, adjustment.kind, adjustment.base,
+        Number(adjustment.value), adjustment.applicable, adjustment.source,
+        adjustment.source_date, null, null, null,
+      ]);
+    }
+  }
+  addTable(sheet, 4, ["Senaryo ID", "Senaryo", "Para Birimi", "Kur", "Sıra", "Kalem", "Tür", "Matrah", "Değer", "Uygulanır", "Kaynak", "Kaynak Tarihi", "Matrah Tutarı", "Ayarlama", "Yürüyen Toplam"], rows, "O");
+  rows.forEach((_, index) => {
+    const row = index + 5;
+    const direct = `SUM('Poz Eşleştirme'!$N$5:$N$${Math.max(priceMappings.length + 4, 5)})*D${row}`;
+    const samePrevious = row > 5 ? `A${row - 1}=A${row}` : "FALSE";
+    const previousAdjustment = row > 5 ? `N${row - 1}` : "0";
+    const previousRunning = row > 5 ? `O${row - 1}` : direct;
+    sheet.getRange(`M${row}`).formulas = [[`=IF(H${row}="direct_cost",${direct},IF(H${row}="previous_adjustment",IF(${samePrevious},${previousAdjustment},0),IF(${samePrevious},${previousRunning},${direct})))`]];
+    sheet.getRange(`N${row}`).formulas = [[`=IF(J${row}<>TRUE,0,IF(G${row}="percent",M${row}*I${row}/100,IF(G${row}="index",M${row}*(I${row}-1),I${row})))`]];
+    sheet.getRange(`O${row}`).formulas = [[`=IF(${samePrevious},${previousRunning}+N${row},${direct}+N${row})`]];
+  });
+  [22, 24, 12, 11, 9, 25, 12, 20, 13, 12, 35, 15, 17, 17, 19].forEach(
+    (width, index) => sheet.getRangeByIndexes(0, index, Math.max(rows.length + 4, 5), 1).format.columnWidth = width,
+  );
+  if (rows.length) sheet.getRange(`D5:O${rows.length + 4}`).format.numberFormat = "#,##0.00";
+}
+
+{
+  const sheet = sheets["Teklif Özeti"];
+  addTitle(sheet, "TEKLİF ÖZETİ", "Metraj, onaylı pozlar ve açık ticari ayarlamalar", "H");
+  const rows = offers.map((offer) => [
+    offer.scenario.id, offer.scenario.name, offer.scenario.currency,
+    Number(offer.scenario.exchange_rate), null, null, null,
+    offer.scenario.approved ? "Onaylı" : "Taslak",
+  ]);
+  addTable(sheet, 4, ["Senaryo ID", "Senaryo", "Para Birimi", "Kur", "Doğrudan Maliyet", "Ayarlamalar", "Genel Toplam", "Durum"], rows, "H");
+  offers.forEach((offer, index) => {
+    const row = index + 5;
+    const direct = `SUM('Poz Eşleştirme'!$N$5:$N$${Math.max(priceMappings.length + 4, 5)})*D${row}`;
+    const adjustmentRows = [...offer.scenario.adjustments]
+      .map((item) => scenarioAdjustmentRows.get(`${offer.scenario.id}|${item.id}`))
+      .filter(Boolean);
+    sheet.getRange(`E${row}`).formulas = [[`=${direct}`]];
+    sheet.getRange(`F${row}`).formulas = [[adjustmentRows.length ? `=SUM('Teklif Senaryosu'!N${Math.min(...adjustmentRows)}:N${Math.max(...adjustmentRows)})` : "=0"]];
+    sheet.getRange(`G${row}`).formulas = [[`=E${row}+F${row}`]];
+  });
+  [22, 28, 13, 11, 20, 18, 20, 12].forEach(
+    (width, index) => sheet.getRangeByIndexes(0, index, Math.max(rows.length + 4, 5), 1).format.columnWidth = width,
+  );
+  if (rows.length) sheet.getRange(`D5:G${rows.length + 4}`).format.numberFormat = "#,##0.00";
+  const gateStart = Math.max(rows.length + 7, 10);
+  sheet.getRange(`A${gateStart}:D${gateStart}`).values = [["DİSİPLİN GÜVEN KAPILARI", "DURUM", "KÜÇÜK PROJE", "KARMAŞIK PROJE"]];
+  sheet.getRange(`A${gateStart}:D${gateStart}`).format = headers;
+  if (validationGates.length) {
+    sheet.getRangeByIndexes(gateStart, 0, validationGates.length, 4).values = validationGates.map((gate) => [gate.discipline, gate.state, gate.small_project_approved, gate.complex_project_approved]);
+  }
 }
 
 {

@@ -38,6 +38,10 @@ STAIR_LABEL = re.compile(
     r"\(\s*(?P<tread>\d+(?:[.,]\d+)?)\s*/\s*(?P<riser>\d+(?:[.,]\d+)?)\s*\)",
     re.IGNORECASE,
 )
+STAIR_THICKNESS = re.compile(
+    r"(?:H|D|PLAK(?:\s+KALINLIGI)?)\s*[=:]?\s*(?P<value>\d+(?:[.,]\d+)?)\s*CM",
+    re.IGNORECASE,
+)
 FOUNDATION_THICKNESS = re.compile(
     r"(?:RADYE\s+TEMEL\s*)?(?:H\s*=\s*)?(?P<value>\d+(?:[.,]\d+)?)\s*CM",
     re.IGNORECASE,
@@ -973,7 +977,14 @@ def _stair_plan_elements(
 ) -> tuple[list[DetectedElement], int]:
     scopes: list[tuple[Any, str, tuple[float, float]]] = []
     annotations: list[tuple[Any, re.Match[str], str, tuple[float, float]]] = []
+    stair_geometries: list[ClosedGeometry] = []
+    thickness_notes: list[tuple[Any, float, tuple[float, float], str]] = []
     for entity in document.modelspace():
+        layer_key = normalize(str(entity.dxf.layer))
+        if entity.dxftype() == "LWPOLYLINE" and "MERDIVEN" in layer_key:
+            geometry = _closed_geometry(entity, scale)
+            if geometry is not None and 0.5 <= geometry.area_m2 <= 100:
+                stair_geometries.append(geometry)
         if entity.dxftype() not in {"TEXT", "MTEXT"}:
             continue
         value = _text(entity)
@@ -986,6 +997,16 @@ def _stair_plan_elements(
         match = STAIR_LABEL.search(key)
         if match is not None:
             annotations.append((entity, match, value, point))
+        thickness_match = STAIR_THICKNESS.search(key)
+        if thickness_match is not None and "MERDIVEN" in layer_key:
+            thickness_notes.append(
+                (
+                    entity,
+                    float(thickness_match.group("value").replace(",", ".")) / 100.0,
+                    point,
+                    value,
+                )
+            )
 
     elements: list[DetectedElement] = []
     unresolved_typical = 0
@@ -1011,11 +1032,7 @@ def _stair_plan_elements(
         tread_m = float(match.group("tread").replace(",", ".")) / 100.0
         riser_m = float(match.group("riser").replace(",", ".")) / 100.0
         declared_rise = round(step_count * riser_m, 6)
-        issues = [
-            "missing:plan_area_m2",
-            "missing:horizontal_run_m",
-            "missing:waist_thickness_m",
-        ]
+        issues: list[str] = []
         floor = "TIP MERDIVEN · KAT TEKRARI TANIMSIZ"
         total_rise = declared_rise
         lower_level = None
@@ -1033,36 +1050,120 @@ def _stair_plan_elements(
         annotation_handle = str(entity.dxf.handle)
         scope_handle = str(scope_entity.dxf.handle)
         point_m = (round(point[0] * scale, 6), round(point[1] * scale, 6))
+        geometry_candidates = sorted(
+            (
+                (
+                    math.dist(
+                        point_m,
+                        (
+                            (geometry.bbox[0] + geometry.bbox[2]) / 2,
+                            (geometry.bbox[1] + geometry.bbox[3]) / 2,
+                        ),
+                    ),
+                    geometry,
+                )
+                for geometry in stair_geometries
+            ),
+            key=lambda item: item[0],
+        )
+        matched_geometry = (
+            geometry_candidates[0][1]
+            if geometry_candidates and geometry_candidates[0][0] <= 12.0
+            else None
+        )
+        nearby_thickness = sorted(
+            (
+                (math.dist(point, note_point) * scale, note_entity, thickness, note_text)
+                for note_entity, thickness, note_point, note_text in thickness_notes
+            ),
+            key=lambda item: item[0],
+        )
+        thickness_note = (
+            nearby_thickness[0]
+            if nearby_thickness and nearby_thickness[0][0] <= 12.0
+            else None
+        )
+        measurements: dict[str, float] = {
+            "step_count": float(step_count),
+            "tread_m": round(tread_m, 6),
+            "riser_m": round(riser_m, 6),
+            "total_rise_m": total_rise,
+        }
+        geometry_handles: list[str] = []
+        element_geometry = Geometry(
+            kind="stair_plan_annotation",
+            points=[point_m],
+            bbox=(
+                point_m[0] - 0.1,
+                point_m[1] - 0.1,
+                point_m[0] + 0.1,
+                point_m[1] + 0.1,
+            ),
+        )
+        stair_width = None
+        if matched_geometry is not None:
+            geometry_handles.append(matched_geometry.handle)
+            spans = sorted(
+                (
+                    matched_geometry.bbox[2] - matched_geometry.bbox[0],
+                    matched_geometry.bbox[3] - matched_geometry.bbox[1],
+                )
+            )
+            stair_width = spans[0]
+            measurements.update(
+                {
+                    "plan_area_m2": matched_geometry.area_m2,
+                    "horizontal_run_m": spans[1],
+                    "stair_width_m": stair_width,
+                }
+            )
+            element_geometry = Geometry(
+                kind="explicit_closed_stair_boundary",
+                points=list(matched_geometry.points) + [matched_geometry.points[0]],
+                bbox=matched_geometry.bbox,
+            )
+        else:
+            issues.extend(["missing:plan_area_m2", "missing:horizontal_run_m"])
+        thickness_handle = ""
+        thickness_text = ""
+        if thickness_note is not None:
+            _, note_entity, waist_thickness, thickness_text = thickness_note
+            thickness_handle = str(note_entity.dxf.handle)
+            measurements["waist_thickness_m"] = round(waist_thickness, 6)
+            if stair_width is not None:
+                inclined_length = math.hypot(measurements["horizontal_run_m"], total_rise)
+                measurements.update(
+                    {
+                        "step_volume_m3": round(
+                            0.5 * stair_width * tread_m * riser_m * step_count, 6
+                        ),
+                        "riser_formwork_m2": round(stair_width * riser_m * step_count, 6),
+                        "side_formwork_m2": round(
+                            2 * inclined_length * waist_thickness, 6
+                        ),
+                    }
+                )
+        else:
+            issues.append("missing:waist_thickness_m")
+        identity_handles = [annotation_handle, scope_handle, *geometry_handles]
+        if thickness_handle:
+            identity_handles.append(thickness_handle)
         elements.append(
             DetectedElement(
                 id=_identity(
                     source,
                     floor,
                     "stair",
-                    [annotation_handle, scope_handle],
+                    identity_handles,
                 ),
                 source_id=source.id,
                 discipline=source.discipline,
                 element_type="stair",
                 floor=floor,
                 layer=str(entity.dxf.layer),
-                source_handle=f"{annotation_handle}+{scope_handle}",
-                geometry=Geometry(
-                    kind="stair_plan_annotation",
-                    points=[point_m],
-                    bbox=(
-                        point_m[0] - 0.1,
-                        point_m[1] - 0.1,
-                        point_m[0] + 0.1,
-                        point_m[1] + 0.1,
-                    ),
-                ),
-                measurements={
-                    "step_count": float(step_count),
-                    "tread_m": round(tread_m, 6),
-                    "riser_m": round(riser_m, 6),
-                    "total_rise_m": total_rise,
-                },
+                source_handle="+".join(identity_handles),
+                geometry=element_geometry,
+                measurements=measurements,
                 properties={
                     "quantity_kind": "stair",
                     "element_label": label,
@@ -1084,6 +1185,17 @@ def _stair_plan_elements(
                         "lower_level_m": lower_level,
                         "upper_level_m": upper_level,
                         "repeat_definition_required": len(elevations) < 2,
+                        "boundary_handle": matched_geometry.handle if matched_geometry else "",
+                        "boundary_area_m2": (
+                            matched_geometry.area_m2 if matched_geometry else None
+                        ),
+                        "thickness_note_handle": thickness_handle,
+                        "thickness_text": thickness_text,
+                        "step_volume_policy": (
+                            "0.5 * stair_width * tread * riser * step_count"
+                            if "step_volume_m3" in measurements
+                            else "not_calculated_without_boundary_and_thickness"
+                        ),
                     },
                 },
                 required_inputs=[

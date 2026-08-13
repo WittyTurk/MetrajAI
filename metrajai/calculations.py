@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
@@ -7,6 +8,7 @@ from .contracts import (
     AnalysisWarning,
     Assumption,
     DetectedElement,
+    Discipline,
     QuantityLine,
     ReviewStatus,
 )
@@ -20,6 +22,7 @@ class QuantityDefinition:
     formula: str
     required: tuple[str, ...]
     calculate: Callable[[dict[str, float]], float]
+    optional: bool = False
 
 
 DEFINITIONS: dict[str, tuple[QuantityDefinition, ...]] = {
@@ -140,6 +143,51 @@ DEFINITIONS: dict[str, tuple[QuantityDefinition, ...]] = {
             ),
         ),
         QuantityDefinition(
+            "Beton",
+            "Merdiven basamak betonu",
+            "m³",
+            "step_volume_m3",
+            ("step_volume_m3",),
+            lambda v: v["step_volume_m3"],
+            optional=True,
+        ),
+        QuantityDefinition(
+            "Beton",
+            "Merdiven sahanlık betonu",
+            "m³",
+            "landing_volume_m3",
+            ("landing_volume_m3",),
+            lambda v: v["landing_volume_m3"],
+            optional=True,
+        ),
+        QuantityDefinition(
+            "Kalıp",
+            "Merdiven yan kalıbı",
+            "m²",
+            "side_formwork_m2",
+            ("side_formwork_m2",),
+            lambda v: v["side_formwork_m2"],
+            optional=True,
+        ),
+        QuantityDefinition(
+            "Kalıp",
+            "Merdiven rıht kalıbı",
+            "m²",
+            "riser_formwork_m2",
+            ("riser_formwork_m2",),
+            lambda v: v["riser_formwork_m2"],
+            optional=True,
+        ),
+        QuantityDefinition(
+            "Kalıp",
+            "Merdiven sahanlık alt kalıbı",
+            "m²",
+            "landing_formwork_m2",
+            ("landing_formwork_m2",),
+            lambda v: v["landing_formwork_m2"],
+            optional=True,
+        ),
+        QuantityDefinition(
             "Kalıp",
             "Merdiven eğimli alt kalıbı",
             "m²",
@@ -197,9 +245,38 @@ DEFINITIONS: dict[str, tuple[QuantityDefinition, ...]] = {
             "perimeter_m",
             ("perimeter_m",),
             lambda v: v["perimeter_m"],
+            optional=True,
         ),
     ),
 }
+
+
+def derive_element_measurements(element: DetectedElement) -> None:
+    """Derive only formulaic values from already explicit measurements."""
+    values = element.measurements
+    if element.element_type == "stair":
+        step_inputs = ("stair_width_m", "tread_m", "riser_m", "step_count")
+        if all(values.get(key, 0) > 0 for key in step_inputs):
+            values["step_volume_m3"] = round(
+                0.5
+                * values["stair_width_m"]
+                * values["tread_m"]
+                * values["riser_m"]
+                * values["step_count"],
+                6,
+            )
+            values["riser_formwork_m2"] = round(
+                values["stair_width_m"] * values["riser_m"] * values["step_count"],
+                6,
+            )
+        side_inputs = ("horizontal_run_m", "total_rise_m", "waist_thickness_m")
+        if all(values.get(key, 0) > 0 for key in side_inputs):
+            values["side_formwork_m2"] = round(
+                2
+                * math.hypot(values["horizontal_run_m"], values["total_rise_m"])
+                * values["waist_thickness_m"],
+                6,
+            )
 
 
 def _value_of(key: str) -> Callable[[dict[str, float]], float]:
@@ -211,6 +288,7 @@ def _value_of(key: str) -> Callable[[dict[str, float]], float]:
 
 for element_type, category, description, unit, variable in (
     ("landscape_area", "Peyzaj", "Peyzaj alanı", "m²", "area_m2"),
+    ("finish_area", "Mimari", "Kaplama alanı", "m²", "area_m2"),
     ("landscape_linear", "Peyzaj", "Bordür/hat uzunluğu", "m", "length_m"),
     ("landscape_item", "Peyzaj", "Bitki/ekipman adedi", "adet", "count"),
     ("pipe", "Mekanik", "Boru merkez hattı", "m", "length_m"),
@@ -221,6 +299,8 @@ for element_type, category, description, unit, variable in (
     ("light", "Elektrik", "Armatür adedi", "adet", "count"),
     ("socket", "Elektrik", "Priz adedi", "adet", "count"),
     ("panel", "Elektrik", "Pano adedi", "adet", "count"),
+    ("electrical_item", "Elektrik", "Elektrik ekipmanı adedi", "adet", "count"),
+    ("mechanical_fitting", "Mekanik", "Fittings adedi", "adet", "count"),
 ):
     DEFINITIONS[element_type] = (
         QuantityDefinition(
@@ -241,13 +321,29 @@ def _approved_assumptions(assumptions: Iterable[Assumption]) -> dict[str, Assump
 def calculate_quantities(
     elements: Iterable[DetectedElement],
     assumptions: Iterable[Assumption] = (),
+    blocked_disciplines: set[Discipline] | None = None,
 ) -> tuple[list[QuantityLine], list[AnalysisWarning]]:
     """Calculate only engineer-accepted elements; never substitute missing dimensions."""
     approved = _approved_assumptions(assumptions)
     quantities: list[QuantityLine] = []
     warnings: list[AnalysisWarning] = []
+    locked = blocked_disciplines or set()
     for element in elements:
         if element.review_status != ReviewStatus.ACCEPTED:
+            continue
+        if element.discipline in locked:
+            warnings.append(
+                AnalysisWarning(
+                    code="DISCIPLINE_RELIABILITY_GATE_LOCKED",
+                    message=(
+                        f"{element.discipline.value} disiplini gerçek küçük ve karmaşık "
+                        "proje doğrulamasını tamamlamadığı için kesin metraj kilitli."
+                    ),
+                    source_id=element.source_id,
+                    element_id=element.id,
+                    severity="error",
+                )
+            )
             continue
         definitions = DEFINITIONS.get(element.element_type)
         if not definitions:
@@ -268,6 +364,8 @@ def calculate_quantities(
                 if key not in element.measurements or element.measurements[key] <= 0
             ]
             if missing:
+                if definition.optional:
+                    continue
                 warnings.append(
                     AnalysisWarning(
                         code="ACCEPTED_ELEMENT_MISSING_INPUT",

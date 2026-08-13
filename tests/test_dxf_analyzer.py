@@ -11,6 +11,7 @@ from metrajai.analyzers.architectural_height import (
     apply_architectural_heights,
     extract_architectural_height_evidence,
 )
+from metrajai.calculations import calculate_quantities
 from metrajai.contracts import (
     DetectedElement,
     Discipline,
@@ -230,7 +231,7 @@ def test_architectural_section_levels_supply_reviewable_column_height(
     assert trace["upper_level_m"] == pytest.approx(4.15)
 
 
-def test_unverified_architectural_shapes_do_not_enter_quantity_review(tmp_path: Path) -> None:
+def test_architectural_room_boundaries_enter_engineer_review(tmp_path: Path) -> None:
     path = tmp_path / "architectural_plan.dxf"
     doc = ezdxf.new("R2018")
     doc.header["$INSUNITS"] = 4
@@ -243,8 +244,11 @@ def test_unverified_architectural_shapes_do_not_enter_quantity_review(tmp_path: 
 
     elements, warnings, _ = DxfAnalyzer().analyze(source(path, Discipline.ARCHITECTURAL), path)
 
-    assert elements == []
-    assert any(warning.code == "ARCHITECTURAL_QUANTITIES_DEFERRED" for warning in warnings)
+    room = next(item for item in elements if item.element_type == "room")
+    assert room.measurements["area_m2"] == pytest.approx(0.02)
+    assert room.measurements["perimeter_m"] == pytest.approx(0.6)
+    assert room.review_status == ReviewStatus.PENDING
+    assert any(warning.code == "ARCHITECTURAL_ENGINE_REVIEW_MODE" for warning in warnings)
 
 
 def test_structural_detail_sheet_is_reference_only_even_with_quantity_layers(
@@ -486,6 +490,61 @@ def test_multiview_stair_annotations_require_geometry_and_explicit_floor_repeat(
     assert "blocking:stair_floor_repeat_required" in typical.issues
     assert any(warning.code == "STAIR_PLAN_ANNOTATIONS_LINKED" for warning in warnings)
     assert any(warning.code == "TYPICAL_STAIR_REPEAT_REQUIRED" for warning in warnings)
+
+
+def test_multiview_stair_uses_explicit_boundary_thickness_and_step_evidence(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "stair-with-explicit-evidence.dxf"
+    doc = ezdxf.new("R2018")
+    doc.header["$INSUNITS"] = 5
+    msp = doc.modelspace()
+    for root_x, title in (
+        (0, "TEMEL KALIP PLANI"),
+        (10000, "TEMEL DONATI PLANI"),
+        (20000, "+3.00 KOTU KALIP PLANI"),
+    ):
+        msp.add_text(title, dxfattribs={"insert": (root_x, -1500), "layer": "BASLIK"})
+    msp.add_text(
+        "+0.00 İLE +3.00 KOTLARI ARASI MERDİVEN KALIP DONATI PLANI",
+        dxfattribs={"insert": (30000, 0), "layer": "KA MAHAL ADI"},
+    )
+    msp.add_text(
+        "M1 MERDİVENİ 18 (28/16.67)",
+        dxfattribs={"insert": (30050, 20), "layer": "Y_MERDIVEN"},
+    )
+    msp.add_text(
+        "H=15 CM",
+        dxfattribs={"insert": (30060, 40), "layer": "Y_MERDIVEN"},
+    )
+    msp.add_lwpolyline(
+        [(30000, 100), (30400, 100), (30400, 220), (30000, 220)],
+        close=True,
+        dxfattribs={"layer": "Y_MERDIVEN"},
+    )
+    doc.saveas(path)
+
+    elements, _, _ = DxfAnalyzer().analyze(source(path, Discipline.STRUCTURAL), path)
+
+    stair = next(item for item in elements if item.element_type == "stair")
+    assert stair.properties["element_label"] == "M1"
+    assert stair.measurements["plan_area_m2"] == pytest.approx(4.8)
+    assert stair.measurements["horizontal_run_m"] == pytest.approx(4.0)
+    assert stair.measurements["stair_width_m"] == pytest.approx(1.2)
+    assert stair.measurements["waist_thickness_m"] == pytest.approx(0.15)
+    assert stair.measurements["step_volume_m3"] == pytest.approx(0.5041008)
+    assert stair.measurements["riser_formwork_m2"] == pytest.approx(3.60072)
+    assert stair.measurements["side_formwork_m2"] == pytest.approx(1.5)
+    stair.review_status = ReviewStatus.ACCEPTED
+    lines, warnings = calculate_quantities([stair])
+    assert not warnings
+    assert {line.description for line in lines} >= {
+        "Merdiven eğimli plak betonu",
+        "Merdiven basamak betonu",
+        "Merdiven eğimli alt kalıbı",
+        "Merdiven yan kalıbı",
+        "Merdiven rıht kalıbı",
+    }
 
 
 def test_structural_plan_filter_skips_translated_duplicate_and_blocks_wrong_unit(

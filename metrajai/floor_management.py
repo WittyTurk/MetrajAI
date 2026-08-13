@@ -6,7 +6,10 @@ import unicodedata
 from .contracts import (
     AnalysisWarning,
     DetectedElement,
+    FloorDefinition,
     FloorKind,
+    RepeatAssignment,
+    RepeatScope,
     ReviewStatus,
     SheetKind,
     SourceFile,
@@ -209,6 +212,120 @@ def expand_explicit_floor_repeats(
                 ),
                 source_id=source.id,
                 severity="info",
+            )
+        )
+    return expanded, warnings
+
+
+def expand_approved_repeat_assignments(
+    elements: list[DetectedElement],
+    source: SourceFile,
+    assignments: list[RepeatAssignment],
+    floors: list[FloorDefinition],
+) -> tuple[list[DetectedElement], list[AnalysisWarning]]:
+    """Apply only approved source/element/template repeat decisions.
+
+    The original source-level repeat field remains a compatibility fallback, but once
+    a project has explicit repeat assignments it never participates in expansion.
+    """
+    relevant = [item for item in assignments if item.source_id == source.id]
+    if not relevant:
+        return expand_explicit_floor_repeats(elements, source)
+    floor_by_id = {floor.id: floor for floor in floors}
+    expanded = list(elements)
+    warnings: list[AnalysisWarning] = []
+    created = 0
+    pending = [item for item in relevant if not item.approved]
+    for assignment in [item for item in relevant if item.approved]:
+        if assignment.scope == RepeatScope.SOURCE:
+            selected = [
+                item for item in elements if item.element_type in REPEATABLE_STRUCTURAL_TYPES
+            ]
+        elif assignment.scope == RepeatScope.ELEMENT:
+            selected_ids = set(assignment.element_ids)
+            selected = [item for item in elements if item.id in selected_ids]
+        else:
+            label = assignment.template_label.strip().casefold()
+            selected = [
+                item
+                for item in elements
+                if str(item.properties.get("element_label", "")).strip().casefold() == label
+            ]
+        if not selected:
+            warnings.append(
+                AnalysisWarning(
+                    code="REPEAT_ASSIGNMENT_MATCH_EMPTY",
+                    message=(
+                        f"{assignment.template_label or assignment.id} tekrar kararı hiçbir "
+                        "fiziksel elemanla eşleşmedi."
+                    ),
+                    source_id=source.id,
+                    severity="error",
+                )
+            )
+            continue
+        for floor_id in assignment.target_floor_ids:
+            floor = floor_by_id.get(floor_id)
+            if floor is None:
+                warnings.append(
+                    AnalysisWarning(
+                        code="REPEAT_TARGET_FLOOR_MISSING",
+                        message=f"Tekrar hedef katı bulunamadı: {floor_id}",
+                        source_id=source.id,
+                        severity="error",
+                    )
+                )
+                continue
+            for original in selected:
+                identity = f"{original.id}|repeat-assignment|{assignment.id}|{floor.id}"
+                clone = original.model_copy(deep=True)
+                clone.id = "elm_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+                clone.floor = floor.name
+                clone.properties.update(
+                    {
+                        "explicit_floor_repeat": True,
+                        "repeat_assignment_id": assignment.id,
+                        "repeated_from_element_id": original.id,
+                        "repeated_from_floor": source.floor,
+                        "repeat_target_floor_id": floor.id,
+                        "repeat_reviewer": assignment.reviewer,
+                        "repeat_reason": assignment.reason,
+                    }
+                )
+                clone.issues = [
+                    issue
+                    for issue in clone.issues
+                    if issue
+                    not in {
+                        "blocking:stair_floor_repeat_required",
+                        "previous_acceptance_invalid_after_reanalysis",
+                        "previous_acceptance_blocked_after_reanalysis",
+                    }
+                ]
+                clone.review_status = (
+                    ReviewStatus.NEEDS_REVIEW if clone.missing_inputs() else ReviewStatus.PENDING
+                )
+                expanded.append(clone)
+                created += 1
+    if created:
+        warnings.append(
+            AnalysisWarning(
+                code="APPROVED_ELEMENT_REPETITION_APPLIED",
+                message=(
+                    f"Mühendis onaylı {len(relevant) - len(pending)} tekrar kararıyla "
+                    f"{created} kat elemanı oluşturuldu."
+                ),
+                source_id=source.id,
+                severity="info",
+            )
+        )
+    if pending:
+        warnings.append(
+            AnalysisWarning(
+                code="UNAPPROVED_REPEATS_NOT_APPLIED",
+                message=f"Onay bekleyen {len(pending)} tekrar kararı metraja uygulanmadı.",
+                source_id=source.id,
+                severity="warning",
             )
         )
     return expanded, warnings

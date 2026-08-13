@@ -4,7 +4,6 @@ import logging
 import threading
 from collections.abc import Callable, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
-from pathlib import Path
 
 from .analyzers import DxfAnalyzer
 from .analyzers.architectural_height import (
@@ -19,11 +18,16 @@ from .contracts import (
     AnalysisStatus,
     AnalysisWarning,
     Discipline,
+    ElementEvidence,
+    EvidenceKind,
+    ReliabilityState,
     ReviewDecision,
     SourceFile,
+    SourceFormat,
     utc_now,
 )
-from .floor_management import apply_sheet_ownership, expand_explicit_floor_repeats
+from .floor_management import apply_sheet_ownership, expand_approved_repeat_assignments
+from .source_analyzers import analyze_non_dxf_source
 from .workspace import ProjectWorkspace
 
 LOGGER = logging.getLogger("metrajai.engine")
@@ -60,7 +64,7 @@ class EngineService:
             for source in sources:
                 if source.discipline != Discipline.ARCHITECTURAL:
                     continue
-                if Path(source.stored_path).suffix.lower() != ".dxf":
+                if source.source_format != SourceFormat.DXF:
                     continue
                 items = extract_architectural_height_evidence_from_path(
                     source, self.workspace.source_path(source)
@@ -75,10 +79,18 @@ class EngineService:
                         f"Kaynak bütünlüğü doğrulanamadı: {source.original_name}. "
                         "Dosya proje klasörüne alındıktan sonra değişmiş."
                     )
-                elements, source_warnings, detected_unit = self.analyzer.analyze(
-                    source, self.workspace.source_path(source)
-                )
-                if source.discipline == Discipline.STRUCTURAL and height_evidence:
+                if source.source_format == SourceFormat.DXF:
+                    elements, source_warnings, detected_unit = self.analyzer.analyze(
+                        source, self.workspace.source_path(source)
+                    )
+                else:
+                    elements, source_warnings, detected_unit = analyze_non_dxf_source(
+                        source, self.workspace.source_path(source)
+                    )
+                if source.discipline in {
+                    Discipline.STRUCTURAL,
+                    Discipline.ARCHITECTURAL,
+                } and height_evidence:
                     elements, applied_count = apply_architectural_heights(elements, height_evidence)
                     if applied_count:
                         height = height_evidence[0].height_m
@@ -100,11 +112,34 @@ class EngineService:
                     sources,
                 )
                 source_warnings.extend(ownership_warnings)
-                elements, floor_warnings = expand_explicit_floor_repeats(elements, source)
+                elements, floor_warnings = expand_approved_repeat_assignments(
+                    elements,
+                    source,
+                    self.workspace.list_repeat_assignments(source.id),
+                    self.workspace.list_floors(),
+                )
                 source_warnings.extend(floor_warnings)
                 source.detected_unit = detected_unit
                 self.workspace.save_source(source)
                 self.workspace.replace_source_elements(source.id, elements)
+                for element in elements:
+                    evidence = [
+                        ElementEvidence(
+                            element_id=element.id,
+                            source_id=element.source_id,
+                            kind=EvidenceKind.GEOMETRY,
+                            label=str(element.properties.get("element_label", "")),
+                            source_handle=element.source_handle,
+                            bbox=element.geometry.bbox,
+                            values={
+                                key: value
+                                for key, value in element.measurements.items()
+                                if isinstance(value, (int, float))
+                            },
+                            confidence=element.confidence,
+                        )
+                    ]
+                    self.workspace.replace_element_evidence(element.id, evidence)
                 self.workspace.apply_rebar_revision_assumptions(source.id)
                 warnings.extend(source_warnings)
                 active_run.progress = (index + 1) / max(len(sources), 1) * 0.85
@@ -165,8 +200,18 @@ class EngineService:
         return reviewed, skipped
 
     def refresh_quantities(self) -> list[AnalysisWarning]:
+        gate_by_discipline = {
+            gate.discipline: gate for gate in self.workspace.list_validation_gates()
+        }
+        blocked_disciplines = {
+            discipline
+            for discipline in (Discipline.MECHANICAL, Discipline.ELECTRICAL)
+            if gate_by_discipline[discipline].state != ReliabilityState.RELIABLE
+        }
         quantities, warnings = calculate_quantities(
-            self.workspace.list_elements(), self.workspace.list_assumptions()
+            self.workspace.list_elements(),
+            self.workspace.list_assumptions(),
+            blocked_disciplines,
         )
         self.workspace.replace_quantities(quantities)
         return warnings

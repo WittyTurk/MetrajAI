@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 from uuid import uuid4
@@ -31,6 +32,28 @@ class DrawingUnit(StrEnum):
     UNKNOWN = "unknown"
 
 
+class SourceFormat(StrEnum):
+    DXF = "dxf"
+    XLSX = "xlsx"
+    XLS = "xls"
+    PDF = "pdf"
+    DWG = "dwg"
+    UNKNOWN = "unknown"
+
+
+class CalibrationStatus(StrEnum):
+    NOT_REQUIRED = "not_required"
+    REQUIRED = "required"
+    CONFIRMED = "confirmed"
+
+
+class ReliabilityState(StrEnum):
+    EXPERIMENTAL = "experimental"
+    NEEDS_REVIEW = "needs_review"
+    APPROVED = "approved"
+    RELIABLE = "reliable"
+
+
 class FloorKind(StrEnum):
     GENERAL = "general"
     BASEMENT = "basement"
@@ -54,6 +77,39 @@ class SheetKind(StrEnum):
     OTHER = "other"
 
 
+class RepeatScope(StrEnum):
+    SOURCE = "source"
+    ELEMENT = "element"
+    TEMPLATE = "template"
+
+
+class EvidenceKind(StrEnum):
+    GEOMETRY = "geometry"
+    LABEL = "label"
+    SECTION = "section"
+    SCHEDULE = "schedule"
+    PDF = "pdf"
+    MANUAL = "manual"
+
+
+class MappingStatus(StrEnum):
+    SUGGESTED = "suggested"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class AdjustmentKind(StrEnum):
+    PERCENT = "percent"
+    FIXED = "fixed"
+    INDEX = "index"
+
+
+class AdjustmentBase(StrEnum):
+    DIRECT_COST = "direct_cost"
+    RUNNING_TOTAL = "running_total"
+    PREVIOUS_ADJUSTMENT = "previous_adjustment"
+
+
 class ReviewStatus(StrEnum):
     PENDING = "pending"
     NEEDS_REVIEW = "needs_review"
@@ -70,7 +126,7 @@ class AnalysisStatus(StrEnum):
 
 
 class ProjectManifest(BaseModel):
-    schema_version: int = 1
+    schema_version: int = 2
     project_id: str = Field(default_factory=lambda: new_id("prj"))
     name: str
     created_at: datetime = Field(default_factory=utc_now)
@@ -84,6 +140,7 @@ class SourceFile(BaseModel):
     stored_path: str
     sha256: str
     size_bytes: int
+    source_format: SourceFormat = SourceFormat.UNKNOWN
     discipline: Discipline
     role: str
     floor: str = "GENEL"
@@ -94,6 +151,86 @@ class SourceFile(BaseModel):
     drawing_unit: DrawingUnit = DrawingUnit.UNKNOWN
     detected_unit: DrawingUnit = DrawingUnit.UNKNOWN
     unit_confirmed: bool = False
+    calibration_status: CalibrationStatus = CalibrationStatus.NOT_REQUIRED
+    calibration_scale: float | None = None
+    calibration_points: list[tuple[float, float]] = Field(default_factory=list)
+    derived_from_source_id: str = ""
+    conversion_tool: str = ""
+    conversion_version: str = ""
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class FloorDefinition(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("flr"))
+    project_id: str
+    name: str
+    kind: FloorKind
+    order: int = 0
+    elevation_m: float | None = None
+    height_m: float | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class SheetAssignment(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("sht"))
+    project_id: str
+    source_id: str
+    sheet_kind: SheetKind
+    floor_ids: list[str] = Field(default_factory=list)
+    role: str = ""
+    revision: str = ""
+    approved: bool = False
+    reviewer: str = ""
+    reason: str = ""
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class RepeatAssignment(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("rpt"))
+    project_id: str
+    source_id: str
+    scope: RepeatScope
+    target_floor_ids: list[str] = Field(min_length=1)
+    element_ids: list[str] = Field(default_factory=list)
+    template_label: str = ""
+    approved: bool = False
+    reviewer: str = ""
+    reason: str = ""
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class ElementEvidence(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("evd"))
+    element_id: str
+    source_id: str
+    kind: EvidenceKind
+    label: str = ""
+    page: int | None = None
+    source_handle: str = ""
+    bbox: tuple[float, float, float, float] | None = None
+    values: dict[str, float | str | bool] = Field(default_factory=dict)
+    confidence: float = 0.0
+    created_at: datetime = Field(default_factory=utc_now)
+
+    @field_validator("confidence")
+    @classmethod
+    def evidence_confidence_is_bounded(cls, value: float) -> float:
+        if value < 0 or value > 1:
+            raise ValueError("confidence must be between 0 and 1")
+        return value
+
+
+class ManualOverride(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("ovr"))
+    element_id: str
+    reviewer: str
+    reason: str = Field(min_length=3)
+    old_values: dict[str, float] = Field(default_factory=dict)
+    new_values: dict[str, float] = Field(default_factory=dict)
+    source_id: str = ""
+    source_page: int | None = None
     created_at: datetime = Field(default_factory=utc_now)
 
 
@@ -200,4 +337,102 @@ class AnalysisRun(BaseModel):
     element_count: int = 0
     warning_count: int = 0
     created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class PriceCatalog(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("cat"))
+    project_id: str
+    name: str
+    year: int
+    version: str
+    currency: str = "TRY"
+    source_name: str
+    stored_path: str = ""
+    source_url: str = ""
+    sha256: str
+    is_official: bool = False
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class PriceItem(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("pri"))
+    catalog_id: str
+    code: str
+    description: str
+    unit: str
+    unit_price: Decimal = Decimal("0")
+    currency: str = "TRY"
+    metadata: dict[str, str | float | bool] = Field(default_factory=dict)
+
+    @field_validator("unit_price")
+    @classmethod
+    def price_is_non_negative(cls, value: Decimal) -> Decimal:
+        if value < 0:
+            raise ValueError("unit_price cannot be negative")
+        return value
+
+
+class PriceMapping(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("map"))
+    project_id: str
+    quantity_line_id: str
+    price_item_id: str
+    status: MappingStatus = MappingStatus.SUGGESTED
+    confidence: float = 0.0
+    reviewer: str = ""
+    reason: str = ""
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class OfferAdjustment(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("adj"))
+    label: str
+    kind: AdjustmentKind
+    base: AdjustmentBase = AdjustmentBase.RUNNING_TOTAL
+    value: Decimal
+    order: int = 0
+    applicable: bool | None = None
+    source: str = ""
+    source_date: str = ""
+
+
+class OfferScenario(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("ofr"))
+    project_id: str
+    name: str
+    currency: str = "TRY"
+    exchange_rate: Decimal = Decimal("1")
+    exchange_rate_source: str = ""
+    exchange_rate_date: str = ""
+    adjustments: list[OfferAdjustment] = Field(default_factory=list)
+    approved: bool = False
+    reviewer: str = ""
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class CostLine(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("cst"))
+    scenario_id: str
+    quantity_line_id: str
+    price_item_id: str
+    quantity: Decimal
+    unit: str
+    unit_price: Decimal
+    currency: str
+    amount: Decimal
+    mapping_id: str
+
+
+class ValidationGate(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("gate"))
+    project_id: str
+    discipline: Discipline
+    state: ReliabilityState = ReliabilityState.EXPERIMENTAL
+    small_project_approved: bool = False
+    complex_project_approved: bool = False
+    reviewer: str = ""
+    reason: str = ""
     updated_at: datetime = Field(default_factory=utc_now)

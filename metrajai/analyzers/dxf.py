@@ -119,6 +119,13 @@ RULES: dict[Discipline, tuple[DetectionRule, ...]] = {
             ("area_m2", "perimeter_m"),
             "room",
         ),
+        DetectionRule(
+            "finish_area",
+            ("KAPLAMA", "TAVAN", "ZEMIN", "FLOOR FINISH", "CEILING"),
+            ("LWPOLYLINE", "HATCH"),
+            ("area_m2",),
+            "area",
+        ),
     ),
     Discipline.LANDSCAPE: (
         DetectionRule(
@@ -130,13 +137,17 @@ RULES: dict[Discipline, tuple[DetectionRule, ...]] = {
         ),
         DetectionRule(
             "landscape_linear",
-            ("BORDUR", "YOL", "YURUYUS", "KALDIRIM"),
+            ("BORDUR", "YOL", "YURUYUS", "KALDIRIM", "DRENAJ", "ALTYAPI", "HAT"),
             ("LINE", "LWPOLYLINE"),
             ("length_m",),
             "length",
         ),
         DetectionRule(
-            "landscape_item", ("AGAC", "BITKI", "FURNITURE"), ("INSERT",), ("count",), "count"
+            "landscape_item",
+            ("AGAC", "BITKI", "FURNITURE", "ROGAR", "EKIPMAN", "MOBILYA"),
+            ("INSERT",),
+            ("count",),
+            "count",
         ),
     ),
     Discipline.MECHANICAL: (
@@ -144,6 +155,13 @@ RULES: dict[Discipline, tuple[DetectionRule, ...]] = {
         DetectionRule("duct", ("KANAL", "DUCT"), ("LINE", "LWPOLYLINE"), ("length_m",), "length"),
         DetectionRule(
             "mechanical_equipment", ("CIHAZ", "EQUIP", "MEKANIK"), ("INSERT",), ("count",), "count"
+        ),
+        DetectionRule(
+            "mechanical_fitting",
+            ("FITTING", "DIRSEK", "TE", "REDUKSIYON", "VANA"),
+            ("INSERT",),
+            ("count",),
+            "count",
         ),
     ),
     Discipline.ELECTRICAL: (
@@ -154,6 +172,13 @@ RULES: dict[Discipline, tuple[DetectionRule, ...]] = {
         DetectionRule("light", ("AYDINLATMA", "LIGHT", "LAMBA"), ("INSERT",), ("count",), "count"),
         DetectionRule("socket", ("PRIZ", "SOCKET"), ("INSERT",), ("count",), "count"),
         DetectionRule("panel", ("PANO", "PANEL"), ("INSERT",), ("count",), "count"),
+        DetectionRule(
+            "electrical_item",
+            ("ANAHTAR", "SENSOR", "DETEKTOR", "CIHAZ"),
+            ("INSERT",),
+            ("count",),
+            "count",
+        ),
     ),
 }
 
@@ -229,17 +254,16 @@ class DxfAnalyzer:
         if source.discipline == Discipline.ARCHITECTURAL:
             warnings.append(
                 AnalysisWarning(
-                    code="ARCHITECTURAL_QUANTITIES_DEFERRED",
+                    code="ARCHITECTURAL_ENGINE_REVIEW_MODE",
                     message=(
-                        f"{source.original_name} bu sürümde kesit/kot kanıtı için kullanıldı. "
-                        "Duvar ve mahal sınırı filtreleri altın referansla doğrulanmadan mimari "
-                        "miktar üretilmeyecek."
+                        f"{source.original_name} içindeki açık duvar merkez hatları, mahal ve "
+                        "kaplama sınırları inceleme adayı olarak çıkarıldı. Mühendis onayı "
+                        "olmayan mimari elemanlar kesin metraja girmez."
                     ),
                     source_id=source.id,
                     severity="info",
                 )
             )
-            return [], warnings, detected_unit
 
         elements: list[DetectedElement] = []
         generic_elements: list[DetectedElement] = []
@@ -507,6 +531,14 @@ class DxfAnalyzer:
                 return None
             measurements["width_m"] = spans[0]
             measurements["length_m"] = spans[1]
+        elif (
+            rule.element_type == "wall"
+            and entity.dxftype() == "LWPOLYLINE"
+            and bool(getattr(entity, "closed", False))
+        ):
+            # A closed wall outline does not prove its center line or opening policy.
+            # Keep it out until a paired-boundary wall detector is available.
+            return None
         elif rule.element_type == "shear_wall" and geometry.bbox is not None:
             small, large = sorted(
                 (

@@ -3,6 +3,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   AlertTriangle,
+  BadgeDollarSign,
   Boxes,
   Check,
   ChevronRight,
@@ -14,8 +15,10 @@ import {
   Gauge,
   GitCompareArrows,
   LoaderCircle,
+  Layers3,
   Play,
   Ruler,
+  Repeat2,
   ShieldCheck,
   Trash2,
   X,
@@ -29,17 +32,24 @@ import type {
   DetectedElement,
   Discipline,
   DrawingUnit,
+  FloorDefinition,
   FloorKind,
+  OfferScenario,
+  PriceCatalog,
+  PriceItem,
+  PriceMapping,
   ProjectSummary,
   QuantityLine,
   RevisionChangeKind,
   RevisionComparison,
+  RepeatAssignment,
   ReviewStatus,
   SheetKind,
   SourceFile,
+  ValidationGate,
 } from "./types";
 
-type View = "sources" | "mapping" | "review" | "quantities" | "revisions";
+type View = "sources" | "floors" | "mapping" | "review" | "quantities" | "commercial" | "revisions";
 
 const DISCIPLINES: { value: Discipline; label: string }[] = [
   { value: "structural", label: "Statik" },
@@ -94,6 +104,11 @@ const MEASUREMENT_LABELS: Record<string, string> = {
   horizontal_run_m: "Yatay koşu (m)",
   total_rise_m: "Toplam yükselme (m)",
   waist_thickness_m: "Merdiven plak kalınlığı (m)",
+  step_volume_m3: "Basamak beton hacmi (m³)",
+  landing_volume_m3: "Sahanlık beton hacmi (m³)",
+  side_formwork_m2: "Yan kalıp alanı (m²)",
+  riser_formwork_m2: "Rıht kalıp alanı (m²)",
+  landing_formwork_m2: "Sahanlık alt kalıbı (m²)",
 };
 
 function App() {
@@ -104,6 +119,13 @@ function App() {
   const [elements, setElements] = useState<DetectedElement[]>([]);
   const [quantities, setQuantities] = useState<QuantityLine[]>([]);
   const [warnings, setWarnings] = useState<AnalysisWarning[]>([]);
+  const [floors, setFloors] = useState<FloorDefinition[]>([]);
+  const [repeatAssignments, setRepeatAssignments] = useState<RepeatAssignment[]>([]);
+  const [priceCatalogs, setPriceCatalogs] = useState<PriceCatalog[]>([]);
+  const [priceItems, setPriceItems] = useState<PriceItem[]>([]);
+  const [priceMappings, setPriceMappings] = useState<PriceMapping[]>([]);
+  const [offerScenarios, setOfferScenarios] = useState<OfferScenario[]>([]);
+  const [validationGates, setValidationGates] = useState<ValidationGate[]>([]);
   const [view, setView] = useState<View>("sources");
   const [run, setRun] = useState<AnalysisRun | null>(null);
   const [message, setMessage] = useState("");
@@ -114,19 +136,37 @@ function App() {
 
   async function refresh(projectId = project?.project.project_id) {
     if (!api || !projectId) return;
-    const [summary, nextSources, nextElements, nextQuantities, nextWarnings] =
+    const [
+      summary, nextSources, nextElements, nextQuantities, nextWarnings,
+      nextFloors, nextRepeats, nextCatalogs, nextPriceItems, nextMappings,
+      nextOffers, nextGates,
+    ] =
       await Promise.all([
         api.project(projectId),
         api.sources(projectId),
         api.elements(projectId),
         api.quantities(projectId),
         api.warnings(projectId),
+        api.floors(projectId),
+        api.repeatAssignments(projectId),
+        api.priceCatalogs(projectId),
+        api.priceItems(projectId),
+        api.priceMappings(projectId),
+        api.offerScenarios(projectId),
+        api.validationGates(projectId),
       ]);
     setProject(summary);
     setSources(nextSources);
     setElements(nextElements);
     setQuantities(nextQuantities);
     setWarnings(nextWarnings);
+    setFloors(nextFloors);
+    setRepeatAssignments(nextRepeats);
+    setPriceCatalogs(nextCatalogs);
+    setPriceItems(nextPriceItems);
+    setPriceMappings(nextMappings);
+    setOfferScenarios(nextOffers);
+    setValidationGates(nextGates);
   }
 
   async function startAnalysis() {
@@ -181,10 +221,12 @@ function App() {
         </div>
         <nav className="workflow-nav" aria-label="İş akışı">
           <NavItem index="01" label="Kaynak dosyalar" active={view === "sources"} complete={sources.length > 0} onClick={() => setView("sources")} />
-          <NavItem index="02" label="Birim ve eşleme" active={view === "mapping"} complete={sources.length > 0 && sources.every((source) => source.unit_confirmed || source.detected_unit !== "unknown")} onClick={() => setView("mapping")} />
-          <NavItem index="03" label="Tespit ve onay" active={view === "review"} complete={elements.length > 0 && pendingCount === 0} onClick={() => setView("review")} />
-          <NavItem index="04" label="Kesin metraj" active={view === "quantities"} complete={quantities.length > 0} onClick={() => setView("quantities")} />
-          <NavItem index="05" label="Revizyon karşılaştır" active={view === "revisions"} complete={false} onClick={() => setView("revisions")} />
+          <NavItem index="02" label="Kat ve tekrarlar" active={view === "floors"} complete={floors.length > 0} onClick={() => setView("floors")} />
+          <NavItem index="03" label="Birim ve eşleme" active={view === "mapping"} complete={sources.length > 0 && sources.every((source) => source.source_format !== "dxf" || source.unit_confirmed || source.detected_unit !== "unknown")} onClick={() => setView("mapping")} />
+          <NavItem index="04" label="Tespit ve onay" active={view === "review"} complete={elements.length > 0 && pendingCount === 0} onClick={() => setView("review")} />
+          <NavItem index="05" label="Kesin metraj" active={view === "quantities"} complete={quantities.length > 0} onClick={() => setView("quantities")} />
+          <NavItem index="06" label="Fiyat ve teklif" active={view === "commercial"} complete={priceMappings.some((item) => item.status === "approved")} onClick={() => setView("commercial")} />
+          <NavItem index="07" label="Revizyon karşılaştır" active={view === "revisions"} complete={false} onClick={() => setView("revisions")} />
         </nav>
         <div className="safety-note">
           <ShieldCheck size={18} />
@@ -214,10 +256,12 @@ function App() {
 
         {message && <div className="banner error"><AlertTriangle size={18} /><span>{message}</span><button onClick={() => setMessage("")}><X size={16} /></button></div>}
 
-        {view === "sources" && <SourcesView api={api} project={project} sources={sources} onChanged={() => void refresh()} onNext={() => setView("mapping")} onError={setMessage} />}
+        {view === "sources" && <SourcesView api={api} project={project} sources={sources} onChanged={() => void refresh()} onNext={() => setView("floors")} onError={setMessage} />}
+        {view === "floors" && <FloorsView api={api} projectId={project.project.project_id} sources={sources} elements={elements} floors={floors} repeatAssignments={repeatAssignments} onChanged={() => void refresh()} onError={setMessage} onNext={() => setView("mapping")} />}
         {view === "mapping" && <MappingView api={api} projectId={project.project.project_id} sources={sources} onChanged={() => void refresh()} onNext={() => void startAnalysis()} />}
         {view === "review" && <ReviewView api={api} projectId={project.project.project_id} elements={elements} warnings={warnings} onChanged={() => void refresh()} onNext={() => setView("quantities")} />}
         {view === "quantities" && <QuantitiesView api={api} projectId={project.project.project_id} quantities={quantities} pendingCount={pendingCount} onMessage={setMessage} />}
+        {view === "commercial" && <CommercialView api={api} projectId={project.project.project_id} quantities={quantities} catalogs={priceCatalogs} priceItems={priceItems} mappings={priceMappings} scenarios={offerScenarios} gates={validationGates} onChanged={() => void refresh()} onError={setMessage} />}
         {view === "revisions" && <RevisionComparisonView api={api} projectId={project.project.project_id} sources={sources} />}
       </main>
     </div>
@@ -306,7 +350,6 @@ function SourcesView({ api, project, sources, onChanged, onNext, onError }: { ap
   const [floor, setFloor] = useState("GENEL");
   const [floorKind, setFloorKind] = useState<FloorKind>("general");
   const [sheetKind, setSheetKind] = useState<SheetKind>("plan");
-  const [repeatFloors, setRepeatFloors] = useState("");
   const [revision, setRevision] = useState("");
   const [unit, setUnit] = useState<DrawingUnit>("unknown");
   const [busy, setBusy] = useState(false);
@@ -316,8 +359,8 @@ function SourcesView({ api, project, sources, onChanged, onNext, onError }: { ap
   async function chooseFile() {
     try {
       const selected = isTauri()
-        ? await open({ multiple: false, filters: [{ name: "Proje kaynakları", extensions: ["dxf", "xlsx", "xls"] }] })
-        : (await api.selectFile("DXF veya Excel kaynak dosyasını seçin")).path;
+        ? await open({ multiple: false, filters: [{ name: "Proje kaynakları", extensions: ["dxf", "xlsx", "xls", "pdf"] }] })
+        : (await api.selectFile("DXF, Excel veya PDF kaynak dosyasını seçin")).path;
       if (typeof selected === "string") setPath(selected);
     } catch (dialogError) {
       onError((dialogError as Error).message);
@@ -335,7 +378,7 @@ function SourcesView({ api, project, sources, onChanged, onNext, onError }: { ap
         floor,
         floor_kind: floorKind,
         sheet_kind: sheetKind,
-        repeat_floors: repeatFloors.split(",").map((item) => item.trim()).filter(Boolean),
+        repeat_floors: [],
         revision,
         drawing_unit: unit,
       });
@@ -386,38 +429,131 @@ function SourcesView({ api, project, sources, onChanged, onNext, onError }: { ap
     <div className="content-grid source-layout">
       <section className="panel source-form-panel">
         <div className="section-heading"><div><span className="eyebrow">KAYNAK EKLE</span><h2>Değiştirilmeyen pafta</h2></div><FilePlus2 size={21} /></div>
-        <label>DXF veya çizelge<div className="path-picker"><input value={path} onChange={(event) => setPath(event.target.value)} placeholder="Dosya seçin veya yolu yazın" /><button onClick={() => void chooseFile()}><FolderOpen size={17} /></button></div></label>
+        <label>DXF, Excel veya PDF<div className="path-picker"><input value={path} onChange={(event) => setPath(event.target.value)} placeholder="Dosya seçin veya yolu yazın" /><button onClick={() => void chooseFile()}><FolderOpen size={17} /></button></div></label>
         <div className="form-row"><label>Disiplin<select value={discipline} onChange={(event) => setDiscipline(event.target.value as Discipline)}>{DISCIPLINES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><label>Pafta rolü<input value={role} onChange={(event) => setRole(event.target.value)} placeholder="kalip / detay / mahal" /></label></div>
         <div className="form-row"><label>Kat türü<select value={floorKind} onChange={(event) => setFloorKind(event.target.value as FloorKind)}>{FLOOR_KINDS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><label>Pafta türü<select value={sheetKind} onChange={(event) => setSheetKind(event.target.value as SheetKind)}>{SHEET_KINDS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label></div>
         <div className="form-row three"><label>Kat<input value={floor} onChange={(event) => setFloor(event.target.value)} /></label><label>Revizyon<input value={revision} onChange={(event) => setRevision(event.target.value)} placeholder="R00" /></label><label>Çizim birimi<select value={unit} onChange={(event) => setUnit(event.target.value as DrawingUnit)}><option value="unknown">DXF'ten oku</option><option value="mm">mm</option><option value="cm">cm</option><option value="m">m</option></select></label></div>
-        {floorKind === "typical" && sheetKind === "plan" && <label>Tekrarlanacak katlar<input value={repeatFloors} onChange={(event) => setRepeatFloors(event.target.value)} placeholder="2. KAT, 3. KAT, 4. KAT" /><small className="field-help">Yalnız burada açıkça yazdığınız katlar çoğaltılır.</small></label>}
+        <small className="field-help">Kat tekrarları sonraki ekranda M1–M4 gibi eleman/şablon bazında ve mühendis onayıyla tanımlanır.</small>
         <button className="button primary wide" disabled={!path || busy} onClick={() => void addSource()}>{busy ? <LoaderCircle className="spin" size={17} /> : <FilePlus2 size={17} />}Kaynağı projeye al</button>
         <p className="hint">Dosya SHA-256 kimliğiyle proje klasörüne kopyalanır; özgün dosya değiştirilmez.</p>
       </section>
       <section className="panel source-list-panel">
         <div className="section-heading"><div><span className="eyebrow">PROJE KAYNAKLARI</span><h2>{sources.length} dosya hazır</h2></div><span className="count-badge">{sources.length}</span></div>
         <div className="source-list">
-          {sources.length === 0 ? <EmptyState icon={<Boxes />} title="Henüz kaynak yok" detail="İlk DXF paftasını veya referans çizelgesini ekleyin." /> : sources.map((source) => <div className="source-row" key={source.id}><div className={`file-icon ${source.discipline}`}>{source.original_name.split(".").pop()?.toUpperCase()}</div><div className="source-main"><strong>{source.original_name}</strong><span>{disciplineLabel(source.discipline)} · {sheetKindLabel(source.sheet_kind)} · {floorKindLabel(source.floor_kind)} / {source.floor}</span><small>{source.repeat_floors.length ? `Tekrar: ${source.repeat_floors.join(", ")} · ` : ""}SHA {source.sha256.slice(0, 12)}</small></div><div className="source-actions"><select className="source-discipline" aria-label={`${source.original_name} disiplini`} value={source.discipline} disabled={updatingId === source.id} onChange={(event) => void changeDiscipline(source, event.target.value as Discipline)}>{DISCIPLINES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select><div className={`unit-pill ${source.unit_confirmed ? "confirmed" : ""}`}>{source.unit_confirmed ? source.drawing_unit : source.detected_unit !== "unknown" ? `${source.detected_unit} algılandı` : "birim bekliyor"}</div><button className="source-delete" aria-label={`${source.original_name} kaynağını sil`} title="Kaynağı sil" disabled={deletingId === source.id} onClick={() => void removeSource(source)}>{deletingId === source.id ? <LoaderCircle className="spin" size={16} /> : <Trash2 size={16} />}</button></div></div>)}
+          {sources.length === 0 ? <EmptyState icon={<Boxes />} title="Henüz kaynak yok" detail="İlk DXF paftasını veya referans çizelgesini ekleyin." /> : sources.map((source) => <div className="source-row" key={source.id}><div className={`file-icon ${source.discipline}`}>{source.original_name.split(".").pop()?.toUpperCase()}</div><div className="source-main"><strong>{source.original_name}</strong><span>{disciplineLabel(source.discipline)} · {sheetKindLabel(source.sheet_kind)} · {floorKindLabel(source.floor_kind)} / {source.floor}</span><small>SHA {source.sha256.slice(0, 12)}</small></div><div className="source-actions"><select className="source-discipline" aria-label={`${source.original_name} disiplini`} value={source.discipline} disabled={updatingId === source.id} onChange={(event) => void changeDiscipline(source, event.target.value as Discipline)}>{DISCIPLINES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select><div className={`unit-pill ${sourceStatusReady(source) ? "confirmed" : ""}`}>{sourceStatusLabel(source)}</div><button className="source-delete" aria-label={`${source.original_name} kaynağını sil`} title="Kaynağı sil" disabled={deletingId === source.id} onClick={() => void removeSource(source)}>{deletingId === source.id ? <LoaderCircle className="spin" size={16} /> : <Trash2 size={16} />}</button></div></div>)}
         </div>
-        <button className="button secondary next-button" disabled={sources.length === 0} onClick={onNext}>Birim ve eşlemeye geç <ChevronRight size={16} /></button>
+        <button className="button secondary next-button" disabled={sources.length === 0} onClick={onNext}>Kat ve tekrarlara geç <ChevronRight size={16} /></button>
       </section>
     </div>
   );
 }
 
+function FloorsView({ api, projectId, sources, elements, floors, repeatAssignments, onChanged, onError, onNext }: { api: EngineApi; projectId: string; sources: SourceFile[]; elements: DetectedElement[]; floors: FloorDefinition[]; repeatAssignments: RepeatAssignment[]; onChanged: () => void; onError: (message: string) => void; onNext: () => void }) {
+  const [name, setName] = useState("");
+  const [kind, setKind] = useState<FloorKind>("ground");
+  const [elevation, setElevation] = useState("0");
+  const [height, setHeight] = useState("3");
+  const [sourceId, setSourceId] = useState(sources[0]?.id ?? "");
+  const [scope, setScope] = useState<"source" | "template">("template");
+  const [templateLabel, setTemplateLabel] = useState("");
+  const [targetFloorIds, setTargetFloorIds] = useState<string[]>([]);
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (!sourceId && sources[0]) setSourceId(sources[0].id);
+  }, [sourceId, sources]);
+  const detectedLabels = useMemo(() => Array.from(new Set(elements.filter((item) => item.source_id === sourceId).map((item) => String(item.properties.element_label ?? "").trim()).filter(Boolean))).sort(), [elements, sourceId]);
+
+  async function addFloor() {
+    if (!name.trim()) return;
+    setBusy(true);
+    try {
+      await api.createFloor(projectId, {
+        name: name.trim(), kind, order: floors.length,
+        elevation_m: elevation === "" ? null : Number(elevation),
+        height_m: height === "" ? null : Number(height),
+      });
+      setName("");
+      onChanged();
+    } catch (error) {
+      onError((error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function addRepeat() {
+    if (!sourceId || targetFloorIds.length === 0 || reason.trim().length < 3) return;
+    setBusy(true);
+    try {
+      await api.createRepeatAssignment(projectId, {
+        source_id: sourceId,
+        scope,
+        target_floor_ids: targetFloorIds,
+        element_ids: [],
+        template_label: scope === "template" ? templateLabel.trim() : "",
+        approved: true,
+        reviewer: "Mühendis",
+        reason: reason.trim(),
+      });
+      setTemplateLabel("");
+      setReason("");
+      setTargetFloorIds([]);
+      onChanged();
+    } catch (error) {
+      onError((error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return <div className="stack">
+    <section className="callout"><Layers3 size={22} /><div><strong>Katlar bir kez tanımlanır, tekrarlar eleman bazında onaylanır</strong><p>M1–M4 gibi şablonlar yalnız seçilen hedef katlarda oluşur; kaynak dosyanın tamamı kendiliğinden çoğalmaz.</p></div><span className={floors.length ? "safe" : "risk"}>{floors.length ? `${floors.length} kat` : "Kat gerekli"}</span></section>
+    <div className="content-grid source-layout">
+      <section className="panel source-form-panel"><div className="section-heading"><div><span className="eyebrow">KAT TANIMI</span><h2>Kot ve yükseklik</h2></div><Layers3 size={21} /></div><label>Kat adı<input value={name} onChange={(event) => setName(event.target.value)} placeholder="ZEMİN KAT" /></label><div className="form-row"><label>Kat türü<select value={kind} onChange={(event) => setKind(event.target.value as FloorKind)}>{FLOOR_KINDS.filter((item) => item.value !== "detail" && item.value !== "general").map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><label>Sıra<input type="number" value={floors.length} readOnly /></label></div><div className="form-row"><label>Kot (m)<input type="number" step="0.01" value={elevation} onChange={(event) => setElevation(event.target.value)} /></label><label>Kat yüksekliği (m)<input type="number" min="0" step="0.01" value={height} onChange={(event) => setHeight(event.target.value)} /></label></div><button className="button primary wide" disabled={busy || !name.trim()} onClick={() => void addFloor()}><FilePlus2 size={16} /> Katı ekle</button></section>
+      <section className="panel source-list-panel"><div className="section-heading"><div><span className="eyebrow">KAT LİSTESİ</span><h2>{floors.length} kat tanımlı</h2></div></div><div className="source-list">{floors.map((floor) => <div className="source-row" key={floor.id}><div className="file-icon structural">{floor.order + 1}</div><div className="source-main"><strong>{floor.name}</strong><span>{floorKindLabel(floor.kind)} · Kot {floor.elevation_m ?? "—"} m</span><small>Yükseklik {floor.height_m ?? "eksik"} m</small></div><button className="source-delete" title="Katı sil" onClick={async () => { try { await api.deleteFloor(projectId, floor.id); onChanged(); } catch (error) { onError((error as Error).message); } }}><Trash2 size={16} /></button></div>)}{floors.length === 0 && <EmptyState icon={<Layers3 />} title="Kat tanımı yok" detail="Önce bodrum, zemin, normal, çatı ve temel katlarını ekleyin." />}</div></section>
+    </div>
+    <section className="panel"><div className="section-heading"><div><span className="eyebrow">ONAYLI TEKRAR</span><h2>Şablon veya kaynak kapsamı</h2></div><Repeat2 size={21} /></div><div className="repeat-form"><label>Kaynak<select value={sourceId} onChange={(event) => setSourceId(event.target.value)}><option value="">Seçiniz</option>{sources.filter((item) => item.source_format === "dxf").map((source) => <option key={source.id} value={source.id}>{source.original_name}</option>)}</select></label><label>Kapsam<select value={scope} onChange={(event) => setScope(event.target.value as "source" | "template")}><option value="template">Eleman şablonu</option><option value="source">Kaynağın fiziksel elemanları</option></select></label><label>Şablon etiketi<input value={templateLabel} disabled={scope !== "template"} onChange={(event) => setTemplateLabel(event.target.value)} list="detected-template-labels" placeholder="M1" /><datalist id="detected-template-labels">{detectedLabels.map((label) => <option key={label} value={label} />)}</datalist></label><label>Hedef katlar<select multiple value={targetFloorIds} onChange={(event) => setTargetFloorIds(Array.from(event.target.selectedOptions, (option) => option.value))}>{floors.map((floor) => <option key={floor.id} value={floor.id}>{floor.name}</option>)}</select></label><label className="repeat-reason">Mühendis gerekçesi<input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Tip kat merdiven detayı ve kat listesi kontrol edildi" /></label><button className="button primary" disabled={busy || !sourceId || targetFloorIds.length === 0 || reason.trim().length < 3 || (scope === "template" && !templateLabel.trim())} onClick={() => void addRepeat()}><Check size={16} /> Onaylı tekrar ekle</button></div><div className="repeat-list">{repeatAssignments.map((item) => <div className="repeat-row" key={item.id}><span className="status-tag accepted">Onaylı</span><div><strong>{item.scope === "template" ? item.template_label : "Kaynak kapsamı"}</strong><small>{sources.find((source) => source.id === item.source_id)?.original_name ?? item.source_id}</small></div><span>{item.target_floor_ids.map((id) => floors.find((floor) => floor.id === id)?.name ?? id).join(", ")}</span><small>{item.reason}</small><button className="source-delete" onClick={async () => { try { await api.deleteRepeatAssignment(projectId, item.id); onChanged(); } catch (error) { onError((error as Error).message); } }}><Trash2 size={15} /></button></div>)}</div></section>
+    <div className="footer-action"><p>Analiz, yalnız burada onaylanmış tekrar kararlarını uygular.</p><button className="button primary" disabled={floors.length === 0} onClick={onNext}>Birim ve eşlemeye geç <ChevronRight size={16} /></button></div>
+  </div>;
+}
+
 function MappingView({ api, projectId, sources, onChanged, onNext }: { api: EngineApi; projectId: string; sources: SourceFile[]; onChanged: () => void; onNext: () => void }) {
-  const unresolvedUnits = sources.filter((source) => !source.unit_confirmed && source.detected_unit === "unknown" && !(source.discipline === "structural" && ["detail", "section", "elevation", "other"].includes(source.sheet_kind)));
-  const unresolvedSheets = sources.filter((source) => source.discipline === "structural" && source.sheet_kind === "unspecified");
-  const unresolvedCount = unresolvedUnits.length + unresolvedSheets.length;
+  const dxfSources = sources.filter((source) => source.source_format === "dxf");
+  const pdfSources = sources.filter((source) => source.source_format === "pdf");
+  const unresolvedUnits = dxfSources.filter((source) => !source.unit_confirmed && source.detected_unit === "unknown" && !(source.discipline === "structural" && ["detail", "section", "elevation", "other"].includes(source.sheet_kind)));
+  const unresolvedSheets = dxfSources.filter((source) => source.discipline === "structural" && source.sheet_kind === "unspecified");
+  const unresolvedPdf = pdfSources.filter((source) => source.calibration_status !== "confirmed");
+  const unresolvedCount = unresolvedUnits.length + unresolvedSheets.length + unresolvedPdf.length;
   return <div className="stack">
     <section className="callout"><Gauge size={22} /><div><strong>Pafta ve birim güvenlik kapısı</strong><p>DXF birimi ve pafta görevi açıkça eşlenir. Detay/kesit paftaları fiziksel eleman adedine girmez.</p></div><span className={unresolvedCount ? "risk" : "safe"}>{unresolvedCount ? `${unresolvedCount} karar gerekli` : "Hazır"}</span></section>
     <section className="panel">
       <div className="section-heading"><div><span className="eyebrow">KAT VE PAFTA YÖNETİMİ</span><h2>Her dosyanın tek ve açık görevi</h2></div></div>
       <div className="sheet-mapping-list">{sources.map((source) => <SourceMappingEditor key={source.id} api={api} projectId={projectId} source={source} onChanged={onChanged} />)}</div>
     </section>
-    <section className="panel"><div className="section-heading"><div><span className="eyebrow">BİRİM DOĞRULAMA</span><h2>Her kaynak için tek standart: metre</h2></div></div><div className="mapping-table"><div className="mapping-head"><span>Kaynak</span><span>DXF algısı</span><span>Kullanılacak birim</span><span>Durum</span></div>{sources.map((source) => <div className="mapping-row" key={source.id}><div><strong>{source.original_name}</strong><small>{source.floor} · {source.role}</small></div><code>{source.detected_unit}</code><select value={source.unit_confirmed ? source.drawing_unit : source.detected_unit} onChange={async (event) => { const selected = event.target.value as DrawingUnit; if (selected !== "unknown") { await api.confirmUnit(projectId, source.id, selected); onChanged(); } }}><option value="unknown">Seçiniz</option><option value="mm">Milimetre</option><option value="cm">Santimetre</option><option value="m">Metre</option></select><span className={`status-dot-label ${source.unit_confirmed || source.detected_unit !== "unknown" ? "ok" : "warn"}`}><i />{source.unit_confirmed ? "Onaylandı" : source.detected_unit !== "unknown" ? "DXF değeri" : "Bekliyor"}</span></div>)}</div></section>
-    <div className="footer-action"><p>Tip katlar yalnız açıkça yazılan hedef katlara tekrarlanır; donatı çizelgesi ve detaylar çoğaltılmaz.</p><button className="button primary" disabled={unresolvedCount > 0} onClick={onNext}><Play size={16} fill="currentColor" /> Tespitleri oluştur</button></div>
+    {dxfSources.length > 0 && <section className="panel"><div className="section-heading"><div><span className="eyebrow">BİRİM DOĞRULAMA</span><h2>DXF kaynakları metre standardına dönüştürülür</h2></div></div><div className="mapping-table"><div className="mapping-head"><span>Kaynak</span><span>DXF algısı</span><span>Kullanılacak birim</span><span>Durum</span></div>{dxfSources.map((source) => <div className="mapping-row" key={source.id}><div><strong>{source.original_name}</strong><small>{source.floor} · {source.role}</small></div><code>{source.detected_unit}</code><select value={source.unit_confirmed ? source.drawing_unit : source.detected_unit} onChange={async (event) => { const selected = event.target.value as DrawingUnit; if (selected !== "unknown") { await api.confirmUnit(projectId, source.id, selected); onChanged(); } }}><option value="unknown">Seçiniz</option><option value="mm">Milimetre</option><option value="cm">Santimetre</option><option value="m">Metre</option></select><span className={`status-dot-label ${source.unit_confirmed || source.detected_unit !== "unknown" ? "ok" : "warn"}`}><i />{source.unit_confirmed ? "Onaylandı" : source.detected_unit !== "unknown" ? "DXF değeri" : "Bekliyor"}</span></div>)}</div></section>}
+    {pdfSources.length > 0 && <section className="panel"><div className="section-heading"><div><span className="eyebrow">PDF KALİBRASYONU</span><h2>İki noktalı ölçek doğrulaması</h2></div></div><div className="sheet-mapping-list">{pdfSources.map((source) => <PdfCalibrationEditor key={source.id} api={api} projectId={projectId} source={source} onChanged={onChanged} />)}</div></section>}
+    <div className="footer-action"><p>Yalnız onaylı eleman/şablon tekrarları uygulanır; çizelge ve detaylar körlemesine çoğaltılmaz.</p><button className="button primary" disabled={unresolvedCount > 0} onClick={onNext}><Play size={16} fill="currentColor" /> Tespitleri oluştur</button></div>
   </div>;
+}
+
+function PdfCalibrationEditor({ api, projectId, source, onChanged }: { api: EngineApi; projectId: string; source: SourceFile; onChanged: () => void }) {
+  const [pageDistance, setPageDistance] = useState("100");
+  const [realDistance, setRealDistance] = useState("1");
+  const [error, setError] = useState("");
+  async function confirm() {
+    const page = Number(pageDistance);
+    const real = Number(realDistance);
+    if (!(page > 0 && real > 0)) return;
+    try {
+      await api.confirmCalibration(projectId, source.id, real / page, [[0, 0], [page, 0]]);
+      setError("");
+      onChanged();
+    } catch (requestError) {
+      setError((requestError as Error).message);
+    }
+  }
+  return <div className="sheet-mapping-card"><div className="sheet-mapping-title"><div><strong>{source.original_name}</strong><small>Kalibrasyon: {source.calibration_status}</small></div><span className={`sheet-kind-pill ${source.calibration_status === "confirmed" ? "plan" : "detail"}`}>{source.calibration_status === "confirmed" ? "Onaylandı" : "Ölçek gerekli"}</span></div><div className="sheet-mapping-grid"><label>PDF ölçüsü<input type="number" min="0" value={pageDistance} onChange={(event) => setPageDistance(event.target.value)} /></label><label>Gerçek mesafe (m)<input type="number" min="0" value={realDistance} onChange={(event) => setRealDistance(event.target.value)} /></label><div className="sheet-mapping-footer"><small>{error || "Aynı iki nokta arasındaki PDF ve gerçek mesafeyi girin."}</small><button className="button secondary" onClick={() => void confirm()}><Check size={15} /> Ölçeği onayla</button></div></div></div>;
 }
 
 function SourceMappingEditor({ api, projectId, source, onChanged }: { api: EngineApi; projectId: string; source: SourceFile; onChanged: () => void }) {
@@ -425,7 +561,6 @@ function SourceMappingEditor({ api, projectId, source, onChanged }: { api: Engin
   const [floor, setFloor] = useState(source.floor);
   const [floorKind, setFloorKind] = useState<FloorKind>(source.floor_kind);
   const [sheetKind, setSheetKind] = useState<SheetKind>(source.sheet_kind);
-  const [repeatFloors, setRepeatFloors] = useState(source.repeat_floors.join(", "));
   const [revision, setRevision] = useState(source.revision);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
@@ -435,7 +570,6 @@ function SourceMappingEditor({ api, projectId, source, onChanged }: { api: Engin
     setFloor(source.floor);
     setFloorKind(source.floor_kind);
     setSheetKind(source.sheet_kind);
-    setRepeatFloors(source.repeat_floors.join(", "));
     setRevision(source.revision);
   }, [source]);
 
@@ -449,7 +583,7 @@ function SourceMappingEditor({ api, projectId, source, onChanged }: { api: Engin
         floor,
         floor_kind: floorKind,
         sheet_kind: sheetKind,
-        repeat_floors: repeatFloors.split(",").map((item) => item.trim()).filter(Boolean),
+        repeat_floors: [],
         revision,
       });
       setMessage(result.cleared_element_count ? `${result.cleared_element_count} eski tespit temizlendi; analiz gerekli.` : "Eşleme kaydedildi.");
@@ -469,7 +603,7 @@ function SourceMappingEditor({ api, projectId, source, onChanged }: { api: Engin
       <label>Kat adı<input value={floor} onChange={(event) => setFloor(event.target.value)} /></label>
       <label>Pafta rolü<input value={role} onChange={(event) => setRole(event.target.value)} /></label>
       <label>Revizyon<input value={revision} onChange={(event) => setRevision(event.target.value)} placeholder="R00" /></label>
-      <label className="repeat-field">Tekrar katları<input value={repeatFloors} disabled={floorKind !== "typical" || sheetKind !== "plan"} onChange={(event) => setRepeatFloors(event.target.value)} placeholder="2. KAT, 3. KAT" /><small>Yalnız tip kat planında etkindir.</small></label>
+      <label className="repeat-field">Tekrar politikası<input value="Kat ve tekrarlar ekranından yönetilir" disabled /><small>Şablon/eleman seçimi ve mühendis gerekçesi zorunludur.</small></label>
     </div>
     <div className="sheet-mapping-footer"><small className={message.includes("hata") ? "risk" : ""}>{message}</small><button className="button secondary" disabled={busy || !role.trim() || !floor.trim()} onClick={() => void save()}>{busy ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />} Eşlemeyi kaydet</button></div>
   </div>;
@@ -813,6 +947,73 @@ function QuantitiesView({ api, projectId, quantities, pendingCount, onMessage }:
   return <div className="stack"><section className={`callout ${pendingCount ? "warning" : "success"}`}>{pendingCount ? <AlertTriangle size={22} /> : <ShieldCheck size={22} />}<div><strong>{pendingCount ? "Kesin toplam dışında bekleyen elemanlar var" : "Mühendis onaylı kesin metraj"}</strong><p>{pendingCount ? `${pendingCount} eleman onaylanana kadar aşağıdaki toplamların dışında tutulur.` : "Tüm satırlar onaylı bir kaynak elemana ve açık formüle bağlıdır."}</p></div></section><div className="metric-grid">{totals.length ? totals.map((total) => <div className="metric-card" key={`${total.category}-${total.unit}`}><span>{total.category}</span><strong>{formatQuantity(total.value)}</strong><small>{total.unit}</small></div>) : <div className="metric-card empty"><span>Henüz kesin metraj yok</span><strong>0</strong><small>Onay bekleniyor</small></div>}</div><section className="panel"><div className="section-heading"><div><span className="eyebrow">İZLENEBİLİR METRAJ</span><h2>{quantities.length} hesap satırı</h2></div><button className="button primary" disabled={quantities.length === 0} onClick={() => void exportPayload()}><FileSpreadsheet size={17} /> Excel raporu hazırla</button></div><div className="quantity-table"><div className="quantity-head"><span>Kat / Disiplin</span><span>Kalem</span><span>Formül</span><span>Miktar</span></div>{quantities.map((line) => <div className="quantity-row" key={line.id}><span><strong>{line.floor}</strong><small>{disciplineLabel(line.discipline)}</small></span><span><strong>{line.description}</strong><small>{line.element_id.slice(-10)}</small></span><code>{line.formula}</code><span className="quantity-value">{formatQuantity(line.quantity)} <small>{line.unit}</small></span></div>)}{quantities.length === 0 && <EmptyState icon={<FileSpreadsheet />} title="Onaylı hesap satırı yok" detail="Tespit ekranında eleman ölçülerini doğrulayıp onaylayın." />}</div></section></div>;
 }
 
+function CommercialView({ api, projectId, quantities, catalogs, priceItems, mappings, scenarios, gates, onChanged, onError }: { api: EngineApi; projectId: string; quantities: QuantityLine[]; catalogs: PriceCatalog[]; priceItems: PriceItem[]; mappings: PriceMapping[]; scenarios: OfferScenario[]; gates: ValidationGate[]; onChanged: () => void; onError: (message: string) => void }) {
+  const [catalogPath, setCatalogPath] = useState("");
+  const [catalogName, setCatalogName] = useState("2026 Birim Fiyatları");
+  const [catalogYear, setCatalogYear] = useState("2026");
+  const [official, setOfficial] = useState(true);
+  const [scenarioName, setScenarioName] = useState("Ana Teklif");
+  const [generalRate, setGeneralRate] = useState("0");
+  const [profitRate, setProfitRate] = useState("0");
+  const [escalationFactor, setEscalationFactor] = useState("1");
+  const [vatRate, setVatRate] = useState("0");
+  const [busy, setBusy] = useState(false);
+  const quantityById = useMemo(() => new Map(quantities.map((item) => [item.id, item])), [quantities]);
+  const priceById = useMemo(() => new Map(priceItems.map((item) => [item.id, item])), [priceItems]);
+
+  async function chooseCatalog() {
+    try {
+      const selected = isTauri() ? await open({ multiple: false, filters: [{ name: "Birim fiyat kataloğu", extensions: ["xlsx", "xls"] }] }) : (await api.selectFile("Birim fiyat Excel dosyasını seçin")).path;
+      if (typeof selected === "string") setCatalogPath(selected);
+    } catch (error) { onError((error as Error).message); }
+  }
+
+  async function importCatalog() {
+    if (!catalogPath) return;
+    setBusy(true);
+    try {
+      await api.importPriceCatalog(projectId, { path: catalogPath, name: catalogName, year: Number(catalogYear), version: "1", currency: "TRY", is_official: official, source_url: official ? "https://yfk.csb.gov.tr/birim-fiyatlar-100468" : "" });
+      setCatalogPath("");
+      onChanged();
+    } catch (error) { onError((error as Error).message); } finally { setBusy(false); }
+  }
+
+  async function suggest() {
+    setBusy(true);
+    try { await api.suggestPriceMappings(projectId); onChanged(); } catch (error) { onError((error as Error).message); } finally { setBusy(false); }
+  }
+
+  async function approve(mapping: PriceMapping) {
+    try {
+      await api.putPriceMapping(projectId, { quantity_line_id: mapping.quantity_line_id, price_item_id: mapping.price_item_id, status: "approved", confidence: mapping.confidence, reviewer: "Mühendis", reason: "Poz açıklaması, birim ve imalat kapsamı kontrol edildi" });
+      onChanged();
+    } catch (error) { onError((error as Error).message); }
+  }
+
+  async function createScenario() {
+    setBusy(true);
+    const values = [
+      { label: "Genel gider", kind: "percent" as const, base: "direct_cost" as const, value: generalRate, order: 10, applicable: Number(generalRate) > 0 },
+      { label: "Yüklenici kârı", kind: "percent" as const, base: "running_total" as const, value: profitRate, order: 20, applicable: Number(profitRate) > 0 },
+      { label: "Eskalasyon", kind: "index" as const, base: "running_total" as const, value: escalationFactor, order: 30, applicable: Number(escalationFactor) !== 1 },
+      { label: "KDV", kind: "percent" as const, base: "running_total" as const, value: vatRate, order: 40, applicable: Number(vatRate) > 0 },
+    ];
+    try {
+      const result = await api.createOfferScenario(projectId, { name: scenarioName, currency: "TRY", exchange_rate: "1", adjustments: values.map((item, index) => ({ id: `ui-${index}`, ...item, source: "Kullanıcı onayı", source_date: new Date().toISOString().slice(0, 10) })), approved: true, reviewer: "Mühendis" });
+      onError(`Teklif hesaplandı: ${String(result.totals.grand_total ?? "—")} TRY`);
+      onChanged();
+    } catch (error) { onError((error as Error).message); } finally { setBusy(false); }
+  }
+
+  return <div className="stack">
+    <section className="callout"><BadgeDollarSign size={22} /><div><strong>Metraj ile fiyat birbirinden bağımsız ve izlenebilir</strong><p>Yalnız mühendis onaylı poz eşleşmeleri teklife girer; oran ve vergiler açık senaryo kalemleridir.</p></div><span className={mappings.some((item) => item.status === "approved") ? "safe" : "risk"}>{mappings.filter((item) => item.status === "approved").length} onaylı poz</span></section>
+    <div className="content-grid source-layout"><section className="panel source-form-panel"><div className="section-heading"><div><span className="eyebrow">FİYAT KATALOĞU</span><h2>Resmî veya özel Excel</h2></div><FileSpreadsheet size={21} /></div><label>Katalog dosyası<div className="path-picker"><input value={catalogPath} onChange={(event) => setCatalogPath(event.target.value)} placeholder=".xlsx veya .xls" /><button onClick={() => void chooseCatalog()}><FolderOpen size={17} /></button></div></label><label>Katalog adı<input value={catalogName} onChange={(event) => setCatalogName(event.target.value)} /></label><div className="form-row"><label>Yıl<input type="number" value={catalogYear} onChange={(event) => setCatalogYear(event.target.value)} /></label><label className="checkbox-label"><input type="checkbox" checked={official} onChange={(event) => setOfficial(event.target.checked)} /> Resmî katalog</label></div><button className="button primary wide" disabled={busy || !catalogPath} onClick={() => void importCatalog()}><FilePlus2 size={16} /> Kataloğu içe al</button></section><section className="panel source-list-panel"><div className="section-heading"><div><span className="eyebrow">KATALOGLAR</span><h2>{catalogs.length} sürümlü kaynak</h2></div><span className="count-badge">{priceItems.length} poz</span></div><div className="source-list">{catalogs.map((catalog) => <div className="source-row" key={catalog.id}><div className="file-icon architectural">{catalog.year}</div><div className="source-main"><strong>{catalog.name}</strong><span>{catalog.is_official ? "Resmî" : "Özel"} · {catalog.currency} · v{catalog.version}</span><small>SHA {catalog.sha256.slice(0, 12)}</small></div></div>)}{catalogs.length === 0 && <EmptyState icon={<FileSpreadsheet />} title="Katalog yok" detail="Poz, açıklama, birim ve birim fiyat sütunlu Excel ekleyin." />}</div></section></div>
+    <section className="panel"><div className="section-heading"><div><span className="eyebrow">POZ EŞLEŞTİRME</span><h2>{mappings.length} öneri / karar</h2></div><button className="button secondary" disabled={busy || quantities.length === 0 || priceItems.length === 0} onClick={() => void suggest()}><Focus size={16} /> Önerileri oluştur</button></div><div className="commercial-table"><div className="commercial-row head"><span>Metraj</span><span>Poz</span><span>Güven</span><span>Karar</span></div>{mappings.map((mapping) => { const quantity = quantityById.get(mapping.quantity_line_id); const price = priceById.get(mapping.price_item_id); return <div className="commercial-row" key={mapping.id}><span><strong>{quantity?.description ?? mapping.quantity_line_id}</strong><small>{quantity ? `${formatQuantity(quantity.quantity)} ${quantity.unit}` : "Metraj yenilenmiş"}</small></span><span><strong>{price?.code ?? mapping.price_item_id}</strong><small>{price?.description}</small></span><span>%{Math.round(mapping.confidence * 100)}</span><span>{mapping.status === "approved" ? <span className="status-tag accepted">Onaylı</span> : <button className="button secondary" onClick={() => void approve(mapping)}><Check size={14} /> Onayla</button>}</span></div>; })}{mappings.length === 0 && <EmptyState icon={<Focus />} title="Poz eşleşmesi yok" detail="Kesin metraj ve katalog hazır olduğunda önerileri oluşturun." />}</div></section>
+    <section className="panel"><div className="section-heading"><div><span className="eyebrow">TAM TEKLİF</span><h2>Sıralı ticari ayarlamalar</h2></div><BadgeDollarSign size={21} /></div><div className="offer-form"><label>Senaryo adı<input value={scenarioName} onChange={(event) => setScenarioName(event.target.value)} /></label><label>Genel gider %<input type="number" value={generalRate} onChange={(event) => setGeneralRate(event.target.value)} /></label><label>Kâr %<input type="number" value={profitRate} onChange={(event) => setProfitRate(event.target.value)} /></label><label>Eskalasyon çarpanı<input type="number" step="0.001" value={escalationFactor} onChange={(event) => setEscalationFactor(event.target.value)} /></label><label>KDV %<input type="number" value={vatRate} onChange={(event) => setVatRate(event.target.value)} /></label><button className="button primary" disabled={busy || !mappings.some((item) => item.status === "approved")} onClick={() => void createScenario()}><Check size={16} /> Onaylı teklifi hesapla</button></div><div className="offer-list">{scenarios.map((scenario) => <div className="repeat-row" key={scenario.id}><span className={`status-tag ${scenario.approved ? "accepted" : "pending"}`}>{scenario.approved ? "Onaylı" : "Taslak"}</span><div><strong>{scenario.name}</strong><small>{scenario.currency} · kur {scenario.exchange_rate}</small></div><span>{scenario.adjustments.length} ayarlama</span><small>{scenario.reviewer || "Onay bekliyor"}</small></div>)}</div></section>
+    <section className="panel"><div className="section-heading"><div><span className="eyebrow">GÜVENİLİRLİK KAPILARI</span><h2>Disiplin bazlı yayın durumu</h2></div><ShieldCheck size={21} /></div><div className="gate-grid">{gates.map((gate) => <div className="metric-card" key={gate.discipline}><span>{disciplineLabel(gate.discipline)}</span><strong>{gate.state}</strong><small>{gate.small_project_approved ? "Küçük ✓" : "Küçük bekliyor"} · {gate.complex_project_approved ? "Karmaşık ✓" : "Karmaşık bekliyor"}</small></div>)}</div></section>
+  </div>;
+}
+
 const REVISION_LABELS: Record<RevisionChangeKind, string> = {
   added: "Eklendi",
   deleted: "Silindi",
@@ -868,14 +1069,16 @@ function RevisionComparisonView({ api, projectId, sources }: { api: EngineApi; p
 }
 
 function EmptyState({ icon, title, detail }: { icon: React.ReactNode; title: string; detail: string }) { return <div className="empty-state"><span>{icon}</span><strong>{title}</strong><p>{detail}</p></div>; }
-function viewTitle(view: View) { return ({ sources: "Kaynak dosyalar", mapping: "Birim ve eşleme", review: "Tespit ve mühendis onayı", quantities: "Kesin metraj", revisions: "Revizyon karşılaştırması" })[view]; }
+function viewTitle(view: View) { return ({ sources: "Kaynak dosyalar", floors: "Kat ve tekrar yönetimi", mapping: "Birim ve eşleme", review: "Tespit ve mühendis onayı", quantities: "Kesin metraj", commercial: "Fiyat ve teklif", revisions: "Revizyon karşılaştırması" })[view]; }
 function disciplineLabel(value: Discipline) { return DISCIPLINES.find((item) => item.value === value)?.label ?? value; }
 function floorKindLabel(value: FloorKind) { return FLOOR_KINDS.find((item) => item.value === value)?.label ?? value; }
 function sheetKindLabel(value: SheetKind) { return SHEET_KINDS.find((item) => item.value === value)?.label ?? value; }
-function elementTypeLabel(value: string) { return ({ column: "Kolon", beam: "Kiriş", shear_wall: "Perde", slab: "Döşeme", raft: "Radye temel", foundation: "Temel", stair: "Merdiven", rebar: "Donatı", wall: "Duvar", door: "Kapı", window: "Pencere", room: "Mahal", pipe: "Boru", duct: "Kanal", cable: "Kablo", cable_tray: "Kablo tavası", light: "Armatür", socket: "Priz", panel: "Pano" } as Record<string, string>)[value] ?? value; }
+function elementTypeLabel(value: string) { return ({ column: "Kolon", beam: "Kiriş", shear_wall: "Perde", slab: "Döşeme", slab_opening: "Döşeme boşluğu", raft: "Radye temel", foundation: "Temel", stair: "Merdiven", rebar: "Donatı", wall: "Duvar", door: "Kapı", window: "Pencere", room: "Mahal", finish_area: "Kaplama", pipe: "Boru", duct: "Kanal", mechanical_fitting: "Fittings", mechanical_equipment: "Mekanik cihaz", cable: "Kablo", cable_tray: "Kablo tavası", light: "Armatür", socket: "Priz", panel: "Pano", electrical_item: "Elektrik ekipmanı", landscape_area: "Peyzaj alanı", landscape_linear: "Bordür / hat", landscape_item: "Bitki / ekipman", schedule_item: "Poz çizelgesi", pdf_evidence: "PDF kanıtı" } as Record<string, string>)[value] ?? value; }
 function measurementLabel(elementType: string, key: string) { if (elementType === "beam" && key === "height_m") return "Kesit yüksekliği (m)"; if (elementType === "beam" && key === "width_m") return "Kesit genişliği (m)"; return MEASUREMENT_LABELS[key] ?? key; }
 function formatQuantity(value: number) { return new Intl.NumberFormat("tr-TR", { maximumFractionDigits: 3 }).format(value); }
 function formatSigned(value: number) { return `${value >= 0 ? "+" : ""}${formatQuantity(value)}`; }
-function revisionMeasurements(values: Record<string, number>) { const keys = ["width_m", "depth_m", "height_m", "length_m", "area_m2", "thickness_m", "void_area_m2"]; const parts = keys.filter((key) => values[key] !== undefined).map((key) => `${measurementLabel("", key)}: ${formatQuantity(values[key])}`); return parts.length ? parts.join(" · ") : "—"; }
+function revisionMeasurements(values: Record<string, number>) { const keys = ["width_m", "depth_m", "height_m", "length_m", "area_m2", "thickness_m", "void_area_m2", "plan_area_m2", "total_rise_m"]; const parts = keys.filter((key) => values[key] !== undefined).map((key) => `${measurementLabel("", key)}: ${formatQuantity(values[key])}`); return parts.length ? parts.join(" · ") : "—"; }
+function sourceStatusReady(source: SourceFile) { if (source.source_format === "pdf") return source.calibration_status === "confirmed"; if (source.source_format !== "dxf") return true; return source.unit_confirmed || source.detected_unit !== "unknown"; }
+function sourceStatusLabel(source: SourceFile) { if (source.source_format === "pdf") return source.calibration_status === "confirmed" ? "ölçek onaylı" : "ölçek bekliyor"; if (source.source_format !== "dxf") return source.source_format.toUpperCase(); return source.unit_confirmed ? source.drawing_unit : source.detected_unit !== "unknown" ? `${source.detected_unit} algılandı` : "birim bekliyor"; }
 
 export default App;

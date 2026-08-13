@@ -6,12 +6,19 @@ import type {
   Discipline,
   DrawingUnit,
   FloorKind,
+  FloorDefinition,
+  OfferScenario,
+  PriceCatalog,
+  PriceItem,
+  PriceMapping,
   ProjectSummary,
   QuantityLine,
   ReviewStatus,
   RevisionComparison,
+  RepeatAssignment,
   SheetKind,
   SourceFile,
+  ValidationGate,
 } from "./types";
 
 interface EngineConnection {
@@ -53,6 +60,7 @@ export class EngineApi {
       const payload = (await response.json().catch(() => ({}))) as { detail?: string };
       throw new Error(payload.detail || `İstek başarısız (${response.status})`);
     }
+    if (response.status === 204) return undefined as T;
     return response.json() as Promise<T>;
   }
 
@@ -128,6 +136,56 @@ export class EngineApi {
       method: "PATCH",
       body: JSON.stringify({ unit }),
     });
+  }
+
+  confirmCalibration(
+    projectId: string,
+    sourceId: string,
+    scale: number,
+    points: [[number, number], [number, number]],
+  ) {
+    return this.request<SourceFile>(`/projects/${projectId}/sources/${sourceId}/calibration`, {
+      method: "PATCH",
+      body: JSON.stringify({ scale, points }),
+    });
+  }
+
+  floors(projectId: string) {
+    return this.request<FloorDefinition[]>(`/projects/${projectId}/floors`);
+  }
+
+  createFloor(projectId: string, payload: Omit<FloorDefinition, "id">) {
+    return this.request<FloorDefinition>(`/projects/${projectId}/floors`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  deleteFloor(projectId: string, floorId: string) {
+    return this.request<void>(`/projects/${projectId}/floors/${floorId}`, {
+      method: "DELETE",
+    });
+  }
+
+  repeatAssignments(projectId: string) {
+    return this.request<RepeatAssignment[]>(`/projects/${projectId}/repeat-assignments`);
+  }
+
+  createRepeatAssignment(
+    projectId: string,
+    payload: Omit<RepeatAssignment, "id">,
+  ) {
+    return this.request<RepeatAssignment>(`/projects/${projectId}/repeat-assignments`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  deleteRepeatAssignment(projectId: string, assignmentId: string) {
+    return this.request<void>(
+      `/projects/${projectId}/repeat-assignments/${assignmentId}`,
+      { method: "DELETE" },
+    );
   }
 
   updateSourceDiscipline(projectId: string, sourceId: string, discipline: Discipline) {
@@ -247,6 +305,75 @@ export class EngineApi {
 
   quantities(projectId: string) {
     return this.request<QuantityLine[]>(`/projects/${projectId}/quantities`);
+  }
+
+  priceCatalogs(projectId: string) {
+    return this.request<PriceCatalog[]>(`/projects/${projectId}/price-catalogs`);
+  }
+
+  priceItems(projectId: string) {
+    return this.request<PriceItem[]>(`/projects/${projectId}/price-items`);
+  }
+
+  importPriceCatalog(
+    projectId: string,
+    payload: {
+      path: string;
+      name: string;
+      year: number;
+      version: string;
+      currency: string;
+      is_official: boolean;
+      source_url: string;
+    },
+  ) {
+    return this.request<{ catalog: PriceCatalog; item_count: number }>(
+      `/projects/${projectId}/price-catalogs/import`,
+      { method: "POST", body: JSON.stringify(payload) },
+    );
+  }
+
+  priceMappings(projectId: string) {
+    return this.request<PriceMapping[]>(`/projects/${projectId}/price-mappings`);
+  }
+
+  suggestPriceMappings(projectId: string, catalogIds: string[] = []) {
+    return this.request<PriceMapping[]>(`/projects/${projectId}/price-mappings/suggest`, {
+      method: "POST",
+      body: JSON.stringify({ catalog_ids: catalogIds, minimum_confidence: 0.55 }),
+    });
+  }
+
+  putPriceMapping(
+    projectId: string,
+    payload: Omit<PriceMapping, "id">,
+  ) {
+    return this.request<PriceMapping>(`/projects/${projectId}/price-mappings`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  offerScenarios(projectId: string) {
+    return this.request<OfferScenario[]>(`/projects/${projectId}/offer-scenarios`);
+  }
+
+  createOfferScenario(
+    projectId: string,
+    payload: Omit<OfferScenario, "id">,
+  ) {
+    return this.request<{
+      scenario: OfferScenario;
+      line_count: number;
+      totals: Record<string, unknown>;
+    }>(`/projects/${projectId}/offer-scenarios`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  validationGates(projectId: string) {
+    return this.request<ValidationGate[]>(`/projects/${projectId}/validation-gates`);
   }
 
   warnings(projectId: string) {

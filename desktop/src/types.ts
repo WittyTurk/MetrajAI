@@ -25,18 +25,29 @@ export type SheetKind =
   | "elevation"
   | "other";
 export type ReviewStatus = "pending" | "needs_review" | "accepted" | "rejected";
+export type SourceFormat = "dxf" | "xlsx" | "xls" | "pdf" | "dwg" | "unknown";
+export type CalibrationStatus = "not_required" | "required" | "confirmed";
+export type RepeatScope = "source" | "element" | "template";
+export type MappingStatus = "suggested" | "approved" | "rejected";
+export type ReliabilityState = "experimental" | "needs_review" | "approved" | "reliable";
 
 export interface ProjectSummary {
-  project: { project_id: string; name: string; updated_at: string };
+  project: { project_id: string; name: string; updated_at: string; schema_version: number };
   source_count: number;
+  floor_count: number;
+  repeat_assignment_count: number;
   element_count: number;
   review_counts: Record<ReviewStatus, number>;
   quantity_count: number;
+  price_catalog_count: number;
+  offer_scenario_count: number;
+  validation_gates: ValidationGate[];
 }
 
 export interface SourceFile {
   id: string;
   original_name: string;
+  source_format: SourceFormat;
   discipline: Discipline;
   role: string;
   floor: string;
@@ -47,7 +58,30 @@ export interface SourceFile {
   drawing_unit: DrawingUnit;
   detected_unit: DrawingUnit;
   unit_confirmed: boolean;
+  calibration_status: CalibrationStatus;
+  calibration_scale: number | null;
   sha256: string;
+}
+
+export interface FloorDefinition {
+  id: string;
+  name: string;
+  kind: FloorKind;
+  order: number;
+  elevation_m: number | null;
+  height_m: number | null;
+}
+
+export interface RepeatAssignment {
+  id: string;
+  source_id: string;
+  scope: RepeatScope;
+  target_floor_ids: string[];
+  element_ids: string[];
+  template_label: string;
+  approved: boolean;
+  reviewer: string;
+  reason: string;
 }
 
 export interface DetectedElement {
@@ -124,4 +158,67 @@ export interface RevisionComparison {
   summary: Record<RevisionChangeKind, number>;
   changes: RevisionElementChange[];
   warnings: string[];
+}
+
+export interface PriceCatalog {
+  id: string;
+  name: string;
+  year: number;
+  version: string;
+  currency: string;
+  source_name: string;
+  is_official: boolean;
+  sha256: string;
+}
+
+export interface PriceItem {
+  id: string;
+  catalog_id: string;
+  code: string;
+  description: string;
+  unit: string;
+  unit_price: string;
+  currency: string;
+}
+
+export interface PriceMapping {
+  id: string;
+  quantity_line_id: string;
+  price_item_id: string;
+  status: MappingStatus;
+  confidence: number;
+  reviewer: string;
+  reason: string;
+}
+
+export interface OfferAdjustment {
+  id: string;
+  label: string;
+  kind: "percent" | "fixed" | "index";
+  base: "direct_cost" | "running_total" | "previous_adjustment";
+  value: string;
+  order: number;
+  applicable: boolean | null;
+  source: string;
+  source_date: string;
+}
+
+export interface OfferScenario {
+  id: string;
+  name: string;
+  currency: string;
+  exchange_rate: string;
+  adjustments: OfferAdjustment[];
+  approved: boolean;
+  reviewer: string;
+}
+
+export interface ValidationGate {
+  id: string;
+  discipline: Discipline;
+  state: ReliabilityState;
+  small_project_approved: boolean;
+  complex_project_approved: boolean;
+  reviewer: string;
+  reason: string;
 }

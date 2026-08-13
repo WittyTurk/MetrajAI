@@ -20,9 +20,11 @@ dist/
 node_modules/
 desktop/dist/
 desktop/src-tauri/target/
+local-releases/
 desktop/src-tauri/binaries/metrajai-engine*
 desktop/src-tauri/resources/report-runtime/node*
 desktop/src-tauri/resources/report-runtime/node_modules/
+desktop/src-tauri/resources/metrajai-ocr
 *.metrajai/
 *.metrajai.sqlite3
 *.metrajai.sqlite3-*
