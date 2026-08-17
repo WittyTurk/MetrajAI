@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import socket
+import threading
+import time
 from decimal import Decimal
 
 import uvicorn
@@ -58,6 +61,24 @@ def _available_port(host: str) -> int:
     with socket.socket() as handle:
         handle.bind((host, 0))
         return int(handle.getsockname()[1])
+
+
+def _parent_is_alive(parent_pid: int) -> bool:
+    if parent_pid <= 0:
+        return False
+    try:
+        os.kill(parent_pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _exit_when_parent_stops(parent_pid: int) -> None:
+    while _parent_is_alive(parent_pid):
+        time.sleep(0.5)
+    os._exit(0)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -223,6 +244,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=0)
     serve.add_argument("--token", required=True)
+    serve.add_argument("--parent-pid", type=int)
     return parser
 
 
@@ -474,6 +496,13 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "serve":
         if args.host != "127.0.0.1":
             raise SystemExit("MetrajAI API may only bind to 127.0.0.1")
+        if args.parent_pid is not None:
+            threading.Thread(
+                target=_exit_when_parent_stops,
+                args=(args.parent_pid,),
+                daemon=True,
+                name="metrajai-parent-watchdog",
+            ).start()
         port = args.port or _available_port(args.host)
         print(
             json.dumps(

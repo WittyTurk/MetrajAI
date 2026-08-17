@@ -246,7 +246,7 @@ class ProjectRegistry:
 
 def create_app(session_token: str | None = None) -> FastAPI:
     token = session_token or token_urlsafe(32)
-    app = FastAPI(title="MetrajAI Local Engine", version="1.2.0")
+    app = FastAPI(title="MetrajAI Local Engine", version="1.3.1")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
@@ -295,13 +295,38 @@ def create_app(session_token: str | None = None) -> FastAPI:
 
     @app.post("/projects")
     def create_project(request: ProjectCreateRequest):
-        workspace = registry.add(ProjectWorkspace.create(request.path, request.name))
+        try:
+            workspace = registry.add(ProjectWorkspace.create(request.path, request.name))
+        except FileExistsError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Bu klasörde zaten bir MetrajAI projesi var. "
+                    "Üstteki ‘Projeyi aç’ seçeneğini kullanın."
+                ),
+            ) from exc
+        except OSError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Proje klasörü oluşturulamadı: {exc.strerror or str(exc)}",
+            ) from exc
         configure_logging(workspace.logs_dir)
         return workspace.summary()
 
     @app.post("/projects/open")
     def open_project(request: ProjectOpenRequest):
-        workspace = registry.add(ProjectWorkspace(request.path))
+        try:
+            workspace = registry.add(ProjectWorkspace(request.path))
+        except FileNotFoundError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail="Seçilen klasörde MetrajAI projesi bulunamadı.",
+            ) from exc
+        except (OSError, ValueError) as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Proje açılamadı: {exc}",
+            ) from exc
         configure_logging(workspace.logs_dir)
         return workspace.summary()
 

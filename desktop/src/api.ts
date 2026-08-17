@@ -50,14 +50,25 @@ export class EngineApi {
   }
 
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
-    const response = await fetch(`${this.baseUrl}${path}`, {
-      ...init,
-      headers: {
-        "content-type": "application/json",
-        "x-metrajai-token": this.token,
-        ...init.headers,
-      },
-    });
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseUrl}${path}`, {
+        ...init,
+        headers: {
+          "content-type": "application/json",
+          "x-metrajai-token": this.token,
+          ...init.headers,
+        },
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      if (/load failed|failed to fetch|network/i.test(detail)) {
+        throw new Error(
+          "Yerel hesap motoruyla bağlantı kesildi. MetrajAI uygulamasını kapatıp yeniden açın.",
+        );
+      }
+      throw error;
+    }
     if (!response.ok) {
       const payload = (await response.json().catch(() => ({}))) as { detail?: string };
       throw new Error(payload.detail || `İstek başarısız (${response.status})`);

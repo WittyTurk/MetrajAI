@@ -754,7 +754,7 @@ def extract_architectural_plan(
         room_rows.append((item, box, area))
     container_room_paths: set[str] = set()
     for item, box, area in room_rows:
-        if _room_code_near(box, texts):
+        if _normalize(item.layer).startswith("A-ROOM"):
             continue
         contained = [
             other_area

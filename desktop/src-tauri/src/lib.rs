@@ -19,6 +19,14 @@ struct EngineState {
     child: Mutex<Option<CommandChild>>,
 }
 
+fn stop_engine(app: &tauri::AppHandle) {
+    if let Ok(mut child) = app.state::<EngineState>().child.lock() {
+        if let Some(process) = child.take() {
+            let _ = process.kill();
+        }
+    }
+}
+
 #[tauri::command]
 fn engine_connection(state: State<'_, EngineState>) -> Result<EngineConnection, String> {
     state
@@ -29,7 +37,7 @@ fn engine_connection(state: State<'_, EngineState>) -> Result<EngineConnection, 
 }
 
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
@@ -43,10 +51,21 @@ pub fn run() {
                 child: Mutex::new(None),
             });
 
+            let parent_pid = std::process::id().to_string();
             let mut sidecar = app
                 .shell()
                 .sidecar("metrajai-engine")?
-                .args(["serve", "--host", "127.0.0.1", "--port", "0", "--token", &token]);
+                .args([
+                    "serve",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    "0",
+                    "--token",
+                    &token,
+                    "--parent-pid",
+                    &parent_pid,
+                ]);
             let report_runtime = app.path().resource_dir()?.join("resources/report-runtime");
             let node_name = if cfg!(windows) { "node.exe" } else { "node" };
             let node_binary = report_runtime.join(node_name);
@@ -102,13 +121,17 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![engine_connection])
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
-                if let Ok(mut child) = window.state::<EngineState>().child.lock() {
-                    if let Some(process) = child.take() {
-                        let _ = process.kill();
-                    }
-                }
+                stop_engine(window.app_handle());
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running MetrajAI desktop application");
+        .build(tauri::generate_context!())
+        .expect("error while building MetrajAI desktop application");
+    app.run(|app_handle, event| {
+        if matches!(
+            event,
+            tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+        ) {
+            stop_engine(app_handle);
+        }
+    });
 }

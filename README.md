@@ -196,7 +196,7 @@ eleman ve manuel kontrol toplamları sağlandığında özel test alanında olu�
 
 ## Durum
 
-1.3 macOS pilotu, mimari/statik motoru kullanıcı paftalarından bağımsız ölçen açık
+1.3.1 macOS pilotu, mimari/statik motoru kullanıcı paftalarından bağımsız ölçen açık
 kaynak doğrulama laboratuvarını içerir. Şema ve EXPRESS doğrulaması temiz olan PCERT
 IFC4/IFC4.3, resmî IFC4 bileşenleri ve Duplex modelinden üretilen temiz, kör ve
 kontrollü zor DXF'ler karşılaştırılır. Kör dosyalar IFC kimliği taşımadığı için normal

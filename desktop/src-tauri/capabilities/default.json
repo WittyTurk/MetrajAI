@@ -19,7 +19,9 @@
             "--port",
             "0",
             "--token",
-            { "validator": "^[0-9a-f-]{36}$" }
+            { "validator": "^[0-9a-f-]{36}$" },
+            "--parent-pid",
+            { "validator": "^[1-9][0-9]*$" }
           ]
         }
       ]

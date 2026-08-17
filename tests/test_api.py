@@ -13,6 +13,35 @@ TOKEN = "test-session-token"
 HEADERS = {"x-metrajai-token": TOKEN}
 
 
+def test_project_start_returns_actionable_errors_for_existing_or_missing_workspace(
+    tmp_path: Path,
+) -> None:
+    client = TestClient(create_app(TOKEN))
+    project = tmp_path / "project"
+
+    created = client.post(
+        "/projects",
+        json={"path": str(project), "name": "P"},
+        headers=HEADERS,
+    )
+    duplicate = client.post(
+        "/projects",
+        json={"path": str(project), "name": "P"},
+        headers=HEADERS,
+    )
+    missing = client.post(
+        "/projects/open",
+        json={"path": str(tmp_path / "missing")},
+        headers=HEADERS,
+    )
+
+    assert created.status_code == 200
+    assert duplicate.status_code == 409
+    assert "Projeyi aç" in duplicate.json()["detail"]
+    assert missing.status_code == 404
+    assert "projesi bulunamadı" in missing.json()["detail"]
+
+
 def test_source_discipline_can_be_corrected_without_reimport(tmp_path: Path) -> None:
     drawing = tmp_path / "architectural.dxf"
     ezdxf.new("R2018").saveas(drawing)
