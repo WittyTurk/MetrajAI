@@ -1,21 +1,25 @@
 from __future__ import annotations
 
+import math
+import threading
 from pathlib import Path
 
 import pytest
 
 from metrajai.contracts import (
     AnalysisRun,
+    AnalysisStatus,
     AnalysisWarning,
     DetectedElement,
     Discipline,
+    DrawingUnit,
     FloorKind,
     Geometry,
     ReviewDecision,
     ReviewStatus,
     SheetKind,
 )
-from metrajai.service import EngineService
+from metrajai.service import BackgroundAnalysisManager, EngineService
 from metrajai.workspace import ProjectWorkspace
 
 
@@ -102,6 +106,212 @@ def test_workspace_copies_source_and_preserves_review_on_reanalysis(tmp_path: Pa
     assert workspace.verify_source_integrity(source)
     workspace.source_path(source).write_text("tampered", encoding="utf-8")
     assert not workspace.verify_source_integrity(source)
+
+
+def test_changed_detection_requires_fresh_engineer_review(tmp_path: Path) -> None:
+    drawing = tmp_path / "drawing.dxf"
+    drawing.write_text("immutable drawing", encoding="utf-8")
+    workspace = ProjectWorkspace.create(tmp_path / "project", "Pilot")
+    source = workspace.add_source(drawing, discipline=Discipline.STRUCTURAL, role="kalip")
+    workspace.replace_source_elements(source.id, [detected(source.id, height=3.0)])
+    EngineService(workspace).review(
+        ReviewDecision(element_id="elm_stable", status=ReviewStatus.ACCEPTED)
+    )
+
+    changed = detected(source.id, height=3.0)
+    changed.measurements["width_m"] = 0.5
+    workspace.replace_source_elements(source.id, [changed])
+    EngineService(workspace).refresh_quantities()
+
+    reloaded = workspace.get_element("elm_stable")
+    assert reloaded.review_status == ReviewStatus.NEEDS_REVIEW
+    assert "previous_acceptance_changed_after_reanalysis" in reloaded.issues
+    assert workspace.list_quantities() == []
+    reviewed, skipped = EngineService(workspace).review_many(
+        [ReviewDecision(element_id="elm_stable", status=ReviewStatus.ACCEPTED)]
+    )
+    assert reviewed == []
+    assert "elm_stable" in skipped
+    workspace.replace_source_elements(source.id, [changed])
+    assert workspace.get_element("elm_stable").review_status == ReviewStatus.NEEDS_REVIEW
+    with pytest.raises(ValueError, match="kaynak ve gerekçe"):
+        workspace.review_element(
+            ReviewDecision(element_id="elm_stable", status=ReviewStatus.ACCEPTED)
+        )
+    workspace.review_element(
+        ReviewDecision(
+            element_id="elm_stable",
+            status=ReviewStatus.ACCEPTED,
+            reason="Değişen kesit yeniden doğrulandı",
+        )
+    )
+    assert workspace.get_element("elm_stable").review_status == ReviewStatus.ACCEPTED
+
+
+def test_changing_dxf_unit_invalidates_accepted_quantities(tmp_path: Path) -> None:
+    drawing = tmp_path / "drawing.dxf"
+    drawing.write_text("immutable drawing", encoding="utf-8")
+    workspace = ProjectWorkspace.create(tmp_path / "project", "Pilot")
+    source = workspace.add_source(
+        drawing,
+        discipline=Discipline.STRUCTURAL,
+        role="kalip",
+        drawing_unit=DrawingUnit.MM,
+    )
+    workspace.replace_source_elements(source.id, [detected(source.id, height=3.0)])
+    EngineService(workspace).review(
+        ReviewDecision(element_id="elm_stable", status=ReviewStatus.ACCEPTED)
+    )
+    assert workspace.list_quantities()
+
+    workspace.confirm_source_unit(source.id, DrawingUnit.CM)
+
+    assert workspace.list_elements(source_id=source.id) == []
+    assert workspace.list_quantities() == []
+    assert workspace.list_backups()
+
+
+def test_nonfinite_manual_measurement_is_rejected(tmp_path: Path) -> None:
+    drawing = tmp_path / "drawing.dxf"
+    drawing.write_text("immutable drawing", encoding="utf-8")
+    workspace = ProjectWorkspace.create(tmp_path / "project", "Pilot")
+    source = workspace.add_source(drawing, discipline=Discipline.STRUCTURAL, role="kalip")
+    workspace.replace_source_elements(source.id, [detected(source.id)])
+
+    with pytest.raises(ValueError, match="finite"):
+        workspace.review_element(
+            ReviewDecision(
+                element_id="elm_stable",
+                status=ReviewStatus.ACCEPTED,
+                reason="Kesit kontrol edildi",
+                measurement_overrides={"height_m": math.inf},
+            )
+        )
+
+
+def test_failed_multisource_analysis_keeps_previous_results(tmp_path: Path) -> None:
+    first = tmp_path / "first.dxf"
+    second = tmp_path / "second.dxf"
+    first.write_text("first immutable source", encoding="utf-8")
+    second.write_text("second immutable source", encoding="utf-8")
+    workspace = ProjectWorkspace.create(tmp_path / "project", "Pilot")
+    first_source = workspace.add_source(first, discipline=Discipline.STRUCTURAL, role="kalip")
+    second_source = workspace.add_source(second, discipline=Discipline.STRUCTURAL, role="kalip")
+    workspace.replace_source_elements(first_source.id, [detected(first_source.id, height=3.0)])
+    EngineService(workspace).review(
+        ReviewDecision(element_id="elm_stable", status=ReviewStatus.ACCEPTED)
+    )
+    old_quantities = workspace.list_quantities()
+
+    class FailingAnalyzer:
+        def analyze(self, source, path):
+            if source.id == second_source.id:
+                raise ValueError("second drawing failed")
+            changed = detected(source.id, height=3.0)
+            changed.measurements["width_m"] = 0.8
+            return [changed], [], DrawingUnit.MM
+
+    service = EngineService(workspace)
+    service.analyzer = FailingAnalyzer()  # type: ignore[assignment]
+    result = service.analyze()
+
+    assert result.status == AnalysisStatus.FAILED
+    assert workspace.get_element("elm_stable").measurements["width_m"] == 0.4
+    assert workspace.list_quantities() == old_quantities
+
+
+def test_cancelled_multisource_analysis_keeps_previous_results(tmp_path: Path) -> None:
+    first = tmp_path / "first.dxf"
+    second = tmp_path / "second.dxf"
+    first.write_text("first immutable source", encoding="utf-8")
+    second.write_text("second immutable source", encoding="utf-8")
+    workspace = ProjectWorkspace.create(tmp_path / "project", "Pilot")
+    first_source = workspace.add_source(first, discipline=Discipline.STRUCTURAL, role="kalip")
+    workspace.add_source(second, discipline=Discipline.STRUCTURAL, role="kalip")
+    workspace.replace_source_elements(first_source.id, [detected(first_source.id, height=3.0)])
+    EngineService(workspace).review(
+        ReviewDecision(element_id="elm_stable", status=ReviewStatus.ACCEPTED)
+    )
+    old_quantities = workspace.list_quantities()
+    cancel_event = threading.Event()
+
+    class CancellingAnalyzer:
+        def analyze(self, source, path):
+            changed = detected(source.id, height=3.0)
+            changed.measurements["width_m"] = 0.8
+            cancel_event.set()
+            return [changed], [], DrawingUnit.MM
+
+    service = EngineService(workspace)
+    service.analyzer = CancellingAnalyzer()  # type: ignore[assignment]
+    result = service.analyze(cancel_event=cancel_event)
+
+    assert result.status == AnalysisStatus.CANCELLED
+    assert workspace.get_element("elm_stable").measurements["width_m"] == 0.4
+    assert workspace.list_quantities() == old_quantities
+
+
+def test_background_manager_rejects_overlapping_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = ProjectWorkspace.create(tmp_path / "project", "Pilot")
+    entered = threading.Event()
+    release = threading.Event()
+
+    def wait_for_release(self, source_ids, *, run, cancel_event):
+        entered.set()
+        release.wait(timeout=5)
+        run.status = AnalysisStatus.COMPLETED
+        self.workspace.save_run(run)
+        return run
+
+    monkeypatch.setattr(EngineService, "analyze", wait_for_release)
+    manager = BackgroundAnalysisManager()
+    try:
+        first = manager.start(workspace)
+        assert entered.wait(timeout=2)
+        with pytest.raises(ValueError, match="zaten çalışan"):
+            manager.start(workspace)
+        with workspace._connect() as connection:
+            assert connection.execute("SELECT COUNT(*) FROM analysis_runs").fetchone()[0] == 1
+    finally:
+        release.set()
+        manager._executor.shutdown(wait=True)
+    assert manager.get(first.id).status == AnalysisStatus.COMPLETED
+
+
+def test_analysis_publish_rolls_back_every_source_on_commit_error(tmp_path: Path) -> None:
+    drawing = tmp_path / "drawing.dxf"
+    drawing.write_text("immutable drawing", encoding="utf-8")
+    workspace = ProjectWorkspace.create(tmp_path / "project", "Pilot")
+    source = workspace.add_source(drawing, discipline=Discipline.STRUCTURAL, role="kalip")
+    workspace.replace_source_elements(source.id, [detected(source.id, height=3.0)])
+    EngineService(workspace).review(
+        ReviewDecision(element_id="elm_stable", status=ReviewStatus.ACCEPTED)
+    )
+    before = workspace.list_quantities()
+    changed = detected(source.id, height=3.0)
+    changed.measurements["width_m"] = 0.8
+    nonexistent = source.model_copy(update={"id": "src_missing"})
+
+    with pytest.raises(KeyError, match="Unknown source"):
+        workspace.commit_analysis(
+            [(source, [changed], []), (nonexistent, [], [])],
+            set(),
+        )
+
+    assert workspace.get_element("elm_stable").measurements["width_m"] == 0.4
+    assert workspace.list_quantities() == before
+
+
+def test_unknown_source_analysis_finishes_as_failed_run(tmp_path: Path) -> None:
+    workspace = ProjectWorkspace.create(tmp_path / "project", "Pilot")
+
+    run = EngineService(workspace).analyze(["src_missing"])
+
+    assert run.status == AnalysisStatus.FAILED
+    assert "Unknown source" in run.message
+    assert workspace.get_run(run.id).status == AnalysisStatus.FAILED
 
 
 def test_delete_source_removes_derived_records_and_only_project_copy(tmp_path: Path) -> None:

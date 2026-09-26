@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import shutil
 import sqlite3
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .calculations import derive_element_measurements
+from .calculations import calculate_quantities, derive_element_measurements
 from .contracts import (
     AnalysisRun,
     AnalysisWarning,
@@ -464,9 +465,23 @@ class ProjectWorkspace:
 
     def confirm_source_unit(self, source_id: str, unit: DrawingUnit) -> SourceFile:
         source = self.get_source(source_id)
+        if source.source_format != SourceFormat.DXF:
+            raise ValueError("Birim doğrulaması yalnız DXF kaynaklarında kullanılır")
+        if unit == DrawingUnit.UNKNOWN:
+            raise ValueError("Çizim birimi mm, cm veya m olmalıdır")
+        previous_unit = source.drawing_unit if source.unit_confirmed else source.detected_unit
+        if previous_unit != unit and self.list_elements(source_id=source_id):
+            self.create_backup(f"unit-change-{source_id}")
         source.drawing_unit = unit
         source.unit_confirmed = unit != DrawingUnit.UNKNOWN
-        return self.save_source(source)
+        with self._connect() as connection:
+            if previous_unit != unit:
+                self._invalidate_source_results(connection, source_id)
+            connection.execute(
+                "UPDATE sources SET data=? WHERE id=?", (source.model_dump_json(), source_id)
+            )
+        self.save_manifest()
+        return source
 
     def confirm_source_calibration(
         self,
@@ -478,12 +493,73 @@ class ProjectWorkspace:
         source = self.get_source(source_id)
         if source.source_format != SourceFormat.PDF:
             raise ValueError("Kalibrasyon yalnız PDF kaynaklarında kullanılır")
-        if scale <= 0 or len(points) != 2:
+        if (
+            not math.isfinite(scale)
+            or scale <= 0
+            or len(points) != 2
+            or any(not math.isfinite(coordinate) for point in points for coordinate in point)
+        ):
             raise ValueError("PDF kalibrasyonu için pozitif ölçek ve iki nokta gerekir")
+        previous_scale = source.calibration_scale
+        if previous_scale != scale and self.list_elements(source_id=source_id):
+            self.create_backup(f"calibration-change-{source_id}")
         source.calibration_scale = float(scale)
         source.calibration_points = points
         source.calibration_status = CalibrationStatus.CONFIRMED
-        return self.save_source(source)
+        with self._connect() as connection:
+            if previous_scale != scale:
+                self._invalidate_source_results(connection, source_id)
+            connection.execute(
+                "UPDATE sources SET data=? WHERE id=?", (source.model_dump_json(), source_id)
+            )
+        self.save_manifest()
+        return source
+
+    def _invalidate_source_results(self, connection: sqlite3.Connection, source_id: str) -> int:
+        element_ids = [
+            row["id"]
+            for row in connection.execute(
+                "SELECT id FROM elements WHERE source_id=?", (source_id,)
+            ).fetchall()
+        ]
+        if element_ids:
+            connection.execute(
+                "DELETE FROM price_mappings WHERE quantity_line_id IN "
+                "(SELECT id FROM quantity_lines WHERE element_id IN "
+                "(SELECT id FROM elements WHERE source_id=?))",
+                (source_id,),
+            )
+            connection.execute(
+                "DELETE FROM quantity_lines WHERE element_id IN "
+                "(SELECT id FROM elements WHERE source_id=?)",
+                (source_id,),
+            )
+            connection.execute(
+                "DELETE FROM reviews WHERE element_id IN "
+                "(SELECT id FROM elements WHERE source_id=?)",
+                (source_id,),
+            )
+            connection.execute(
+                "DELETE FROM architectural_assignments WHERE subject_element_id IN "
+                "(SELECT id FROM elements WHERE source_id=?)",
+                (source_id,),
+            )
+            stale_ids = set(element_ids)
+            for row in connection.execute(
+                "SELECT id, data FROM architectural_assignments"
+            ).fetchall():
+                assignment = ArchitecturalAssignment.model_validate_json(row["data"])
+                if any(target in stale_ids for target in assignment.target_element_ids):
+                    connection.execute(
+                        "DELETE FROM architectural_assignments WHERE id=?", (row["id"],)
+                    )
+            connection.execute("DELETE FROM elements WHERE source_id=?", (source_id,))
+            connection.execute("DELETE FROM cost_lines")
+        connection.execute("DELETE FROM element_evidence WHERE source_id=?", (source_id,))
+        for row in connection.execute("SELECT id, data FROM warnings").fetchall():
+            if json.loads(row["data"]).get("source_id") == source_id:
+                connection.execute("DELETE FROM warnings WHERE id=?", (row["id"],))
+        return len(element_ids)
 
     def put_floor(self, floor: FloorDefinition) -> FloorDefinition:
         if floor.project_id != self.manifest.project_id:
@@ -739,31 +815,10 @@ class ProjectWorkspace:
         if source.discipline == discipline:
             return source, 0
 
+        if self.list_elements(source_id=source_id):
+            self.create_backup(f"discipline-change-{source_id}")
         with self._connect() as connection:
-            element_ids = [
-                row["id"]
-                for row in connection.execute(
-                    "SELECT id FROM elements WHERE source_id=?", (source_id,)
-                ).fetchall()
-            ]
-            if element_ids:
-                marks = ",".join("?" for _ in element_ids)
-                connection.execute(
-                    f"DELETE FROM quantity_lines WHERE element_id IN ({marks})", element_ids
-                )
-                connection.execute(
-                    f"DELETE FROM reviews WHERE element_id IN ({marks})", element_ids
-                )
-                connection.execute(f"DELETE FROM elements WHERE id IN ({marks})", element_ids)
-
-            warning_ids = [
-                row["id"]
-                for row in connection.execute("SELECT id, data FROM warnings").fetchall()
-                if json.loads(row["data"]).get("source_id") == source_id
-            ]
-            if warning_ids:
-                marks = ",".join("?" for _ in warning_ids)
-                connection.execute(f"DELETE FROM warnings WHERE id IN ({marks})", warning_ids)
+            cleared_count = self._invalidate_source_results(connection, source_id)
 
             source.discipline = discipline
             cursor = connection.execute(
@@ -773,7 +828,7 @@ class ProjectWorkspace:
             if cursor.rowcount == 0:
                 raise KeyError(f"Unknown source: {source.id}")
         self.save_manifest()
-        return source, len(element_ids)
+        return source, cleared_count
 
     def update_source_mapping(
         self,
@@ -808,36 +863,16 @@ class ProjectWorkspace:
         if updated == source:
             return source, 0
 
+        if self.list_elements(source_id=source_id):
+            self.create_backup(f"mapping-change-{source_id}")
         with self._connect() as connection:
-            element_ids = [
-                row["id"]
-                for row in connection.execute(
-                    "SELECT id FROM elements WHERE source_id=?", (source_id,)
-                ).fetchall()
-            ]
-            if element_ids:
-                marks = ",".join("?" for _ in element_ids)
-                connection.execute(
-                    f"DELETE FROM quantity_lines WHERE element_id IN ({marks})", element_ids
-                )
-                connection.execute(
-                    f"DELETE FROM reviews WHERE element_id IN ({marks})", element_ids
-                )
-                connection.execute(f"DELETE FROM elements WHERE id IN ({marks})", element_ids)
-            warning_ids = [
-                row["id"]
-                for row in connection.execute("SELECT id, data FROM warnings").fetchall()
-                if json.loads(row["data"]).get("source_id") == source_id
-            ]
-            if warning_ids:
-                marks = ",".join("?" for _ in warning_ids)
-                connection.execute(f"DELETE FROM warnings WHERE id IN ({marks})", warning_ids)
+            cleared_count = self._invalidate_source_results(connection, source_id)
             connection.execute(
                 "UPDATE sources SET data=? WHERE id=?",
                 (updated.model_dump_json(), source_id),
             )
         self.save_manifest()
-        return updated, len(element_ids)
+        return updated, cleared_count
 
     def delete_source(self, source_id: str) -> dict[str, object]:
         """Delete one imported source and records derived exclusively from it.
@@ -937,67 +972,140 @@ class ProjectWorkspace:
         source_id: str,
         elements: Iterable[DetectedElement],
     ) -> None:
-        values = list(elements)
         with self._connect() as connection:
-            old_ids = {
-                row["id"]
-                for row in connection.execute(
-                    "SELECT id FROM elements WHERE source_id=?", (source_id,)
-                ).fetchall()
-            }
-            new_ids = {element.id for element in values}
-            stale_ids = sorted(old_ids - new_ids)
-            if stale_ids:
-                marks = ",".join("?" for _ in stale_ids)
-                connection.execute(
-                    f"DELETE FROM quantity_lines WHERE element_id IN ({marks})", stale_ids
-                )
-                connection.execute(f"DELETE FROM reviews WHERE element_id IN ({marks})", stale_ids)
-                connection.execute(
-                    f"DELETE FROM element_evidence WHERE element_id IN ({marks})", stale_ids
-                )
-                connection.execute(
-                    f"DELETE FROM architectural_assignments WHERE subject_element_id IN ({marks})",
-                    stale_ids,
-                )
-                assignment_rows = connection.execute(
-                    "SELECT id, data FROM architectural_assignments"
-                ).fetchall()
-                for row in assignment_rows:
-                    item = ArchitecturalAssignment.model_validate_json(row["data"])
-                    if any(target_id in stale_ids for target_id in item.target_element_ids):
-                        connection.execute(
-                            "DELETE FROM architectural_assignments WHERE id=?", (row["id"],)
-                        )
-                connection.execute(f"DELETE FROM elements WHERE id IN ({marks})", stale_ids)
+            self._replace_source_elements(connection, source_id, list(elements))
 
-            decisions_by_element: dict[str, list[ReviewDecision]] = {}
-            if old_ids & new_ids:
-                marks = ",".join("?" for _ in old_ids & new_ids)
-                review_rows = connection.execute(
-                    f"SELECT data FROM reviews WHERE element_id IN ({marks}) ORDER BY rowid",
-                    sorted(old_ids & new_ids),
-                ).fetchall()
-                for row in review_rows:
-                    decision = ReviewDecision.model_validate_json(row["data"])
+    def commit_analysis(
+        self,
+        results: list[tuple[SourceFile, list[DetectedElement], list[ElementEvidence]]],
+        blocked_disciplines: set[Discipline],
+    ) -> list[AnalysisWarning]:
+        """Publish a complete analysis and its quantities in one SQLite transaction."""
+        with self._connect() as connection:
+            for source, elements, evidence in results:
+                cursor = connection.execute(
+                    "UPDATE sources SET data=? WHERE id=?",
+                    (source.model_dump_json(), source.id),
+                )
+                if cursor.rowcount == 0:
+                    raise KeyError(f"Unknown source: {source.id}")
+                self._replace_source_elements(connection, source.id, elements)
+                connection.execute("DELETE FROM element_evidence WHERE source_id=?", (source.id,))
+                connection.executemany(
+                    "INSERT INTO element_evidence(id, element_id, source_id, data) "
+                    "VALUES (?, ?, ?, ?)",
+                    [
+                        (item.id, item.element_id, item.source_id, item.model_dump_json())
+                        for item in evidence
+                    ],
+                )
+                self._apply_rebar_revision_assumptions(connection, source.id)
+            current_elements = [
+                DetectedElement.model_validate_json(row["data"])
+                for row in connection.execute("SELECT data FROM elements ORDER BY rowid").fetchall()
+            ]
+            assumption_rows = connection.execute(
+                "SELECT data FROM assumptions ORDER BY rowid"
+            ).fetchall()
+            assumptions = [Assumption.model_validate_json(row["data"]) for row in assumption_rows]
+            quantities, warnings = calculate_quantities(
+                current_elements, assumptions, blocked_disciplines
+            )
+            self._replace_quantities(connection, quantities)
+        return warnings
+
+    def _replace_source_elements(
+        self,
+        connection: sqlite3.Connection,
+        source_id: str,
+        values: list[DetectedElement],
+    ) -> None:
+        previous = {
+            row["id"]: DetectedElement.model_validate_json(row["data"])
+            for row in connection.execute(
+                "SELECT id, data FROM elements WHERE source_id=?", (source_id,)
+            ).fetchall()
+        }
+        old_ids = set(previous)
+        new_ids = {element.id for element in values}
+        stale_ids = sorted(old_ids - new_ids)
+        if stale_ids:
+            stale_params = [(element_id,) for element_id in stale_ids]
+            connection.executemany(
+                "DELETE FROM price_mappings WHERE quantity_line_id IN "
+                "(SELECT id FROM quantity_lines WHERE element_id=?)",
+                stale_params,
+            )
+            connection.executemany(
+                "DELETE FROM quantity_lines WHERE element_id=?", stale_params
+            )
+            connection.executemany("DELETE FROM reviews WHERE element_id=?", stale_params)
+            connection.executemany(
+                "DELETE FROM element_evidence WHERE element_id=?", stale_params
+            )
+            connection.executemany(
+                "DELETE FROM architectural_assignments WHERE subject_element_id=?",
+                stale_params,
+            )
+            stale_set = set(stale_ids)
+            assignment_rows = connection.execute(
+                "SELECT id, data FROM architectural_assignments"
+            ).fetchall()
+            for row in assignment_rows:
+                item = ArchitecturalAssignment.model_validate_json(row["data"])
+                if any(target_id in stale_set for target_id in item.target_element_ids):
+                    connection.execute(
+                        "DELETE FROM architectural_assignments WHERE id=?", (row["id"],)
+                    )
+            connection.executemany("DELETE FROM elements WHERE id=?", stale_params)
+            connection.execute("DELETE FROM cost_lines")
+
+        decisions_by_element: dict[str, list[ReviewDecision]] = {}
+        if old_ids & new_ids:
+            review_rows = connection.execute(
+                "SELECT data FROM reviews WHERE element_id IN "
+                "(SELECT id FROM elements WHERE source_id=?) ORDER BY rowid",
+                (source_id,),
+            ).fetchall()
+            for row in review_rows:
+                decision = ReviewDecision.model_validate_json(row["data"])
+                if decision.element_id in new_ids:
                     decisions_by_element.setdefault(decision.element_id, []).append(decision)
 
-            for element in values:
-                for decision in decisions_by_element.get(element.id, []):
-                    element.measurements.update(decision.measurement_overrides)
-                    element.review_status = decision.status
-                    element.updated_at = decision.created_at
-                derive_element_measurements(element)
-                if element.review_status == ReviewStatus.ACCEPTED and element.missing_inputs():
-                    element.review_status = ReviewStatus.NEEDS_REVIEW
-                    element.issues.append("previous_acceptance_invalid_after_reanalysis")
-                if element.review_status == ReviewStatus.ACCEPTED and any(
-                    issue.startswith("blocking:") for issue in element.issues
+        for element in values:
+            for decision in decisions_by_element.get(element.id, []):
+                element.measurements.update(decision.measurement_overrides)
+                element.review_status = decision.status
+                element.updated_at = decision.created_at
+            derive_element_measurements(element)
+            prior = previous.get(element.id)
+            if element.review_status == ReviewStatus.ACCEPTED and prior is not None:
+                if prior.review_status != ReviewStatus.ACCEPTED or any(
+                    getattr(prior, field) != getattr(element, field)
+                    for field in (
+                        "discipline",
+                        "element_type",
+                        "floor",
+                        "layer",
+                        "block_name",
+                        "source_handle",
+                        "geometry",
+                        "measurements",
+                        "required_inputs",
+                    )
                 ):
                     element.review_status = ReviewStatus.NEEDS_REVIEW
-                    element.issues.append("previous_acceptance_blocked_after_reanalysis")
-                connection.execute(
-                    """
+                    element.issues.append("previous_acceptance_changed_after_reanalysis")
+            if element.review_status == ReviewStatus.ACCEPTED and element.missing_inputs():
+                element.review_status = ReviewStatus.NEEDS_REVIEW
+                element.issues.append("previous_acceptance_invalid_after_reanalysis")
+            if element.review_status == ReviewStatus.ACCEPTED and any(
+                issue.startswith("blocking:") for issue in element.issues
+            ):
+                element.review_status = ReviewStatus.NEEDS_REVIEW
+                element.issues.append("previous_acceptance_blocked_after_reanalysis")
+            connection.execute(
+                """
                 INSERT INTO elements(id, source_id, element_type, review_status, data)
                 VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
@@ -1006,14 +1114,14 @@ class ProjectWorkspace:
                     review_status=excluded.review_status,
                     data=excluded.data
                 """,
-                    (
-                        element.id,
-                        element.source_id,
-                        element.element_type,
-                        element.review_status.value,
-                        element.model_dump_json(),
-                    ),
-                )
+                (
+                    element.id,
+                    element.source_id,
+                    element.element_type,
+                    element.review_status.value,
+                    element.model_dump_json(),
+                ),
+            )
 
     def list_elements(
         self,
@@ -1052,6 +1160,8 @@ class ProjectWorkspace:
         if decision.measurement_overrides and len(decision.reason.strip()) < 3:
             raise ValueError("Elle girilen ölçü için en az 3 karakterlik gerekçe zorunludur")
         for key, value in decision.measurement_overrides.items():
+            if not math.isfinite(value):
+                raise ValueError(f"Measurement must be finite: {key}")
             if value < 0:
                 raise ValueError(f"Measurement cannot be negative: {key}")
             if key in element.measurements:
@@ -1059,6 +1169,11 @@ class ProjectWorkspace:
             element.measurements[key] = float(value)
         derive_element_measurements(element)
         if decision.status == ReviewStatus.ACCEPTED:
+            if (
+                "previous_acceptance_changed_after_reanalysis" in element.issues
+                and len(decision.reason.strip()) < 3
+            ):
+                raise ValueError("Değişen ölçünün yeniden onayı için kaynak ve gerekçe girin")
             blocking_issues = [
                 issue.removeprefix("blocking:")
                 for issue in element.issues
@@ -1074,6 +1189,11 @@ class ProjectWorkspace:
                 raise ValueError(
                     "Cannot accept element with missing measurements: " + ", ".join(missing)
                 )
+            element.issues = [
+                issue
+                for issue in element.issues
+                if issue != "previous_acceptance_changed_after_reanalysis"
+            ]
         element.review_status = decision.status
         element.updated_at = utc_now()
         with self._connect() as connection:
@@ -1211,6 +1331,12 @@ class ProjectWorkspace:
         }
 
     def apply_rebar_revision_assumptions(self, source_id: str) -> tuple[int, int]:
+        with self._connect() as connection:
+            return self._apply_rebar_revision_assumptions(connection, source_id)
+
+    def _apply_rebar_revision_assumptions(
+        self, connection: sqlite3.Connection, source_id: str
+    ) -> tuple[int, int]:
         prefix = f"rebar_revision_selection:{source_id}:"
         selections = {
             assumption.key.removeprefix(prefix): str(assumption.value)
@@ -1221,44 +1347,47 @@ class ProjectWorkspace:
             return 0, 0
         selected_count = 0
         rejected_count = 0
-        with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT data FROM elements WHERE source_id=? AND element_type='rebar'",
-                (source_id,),
-            ).fetchall()
-            for row in rows:
-                element = DetectedElement.model_validate_json(row["data"])
-                group = str(element.properties.get("revision_group", ""))
-                selected_handle = selections.get(group)
-                if not selected_handle:
-                    continue
-                is_selected = str(element.properties.get("table_handle", "")) == selected_handle
-                element.properties["revision_selected"] = is_selected
-                element.issues = [
-                    issue
-                    for issue in element.issues
-                    if issue != "blocking:rebar_revision_selection_required"
-                    and issue != "previous_acceptance_blocked_after_reanalysis"
-                ]
-                if is_selected:
-                    selected_count += 1
-                    if element.review_status in (
+        rows = connection.execute(
+            "SELECT data FROM elements WHERE source_id=? AND element_type='rebar'",
+            (source_id,),
+        ).fetchall()
+        for row in rows:
+            element = DetectedElement.model_validate_json(row["data"])
+            group = str(element.properties.get("revision_group", ""))
+            selected_handle = selections.get(group)
+            if not selected_handle:
+                continue
+            is_selected = str(element.properties.get("table_handle", "")) == selected_handle
+            element.properties["revision_selected"] = is_selected
+            element.issues = [
+                issue
+                for issue in element.issues
+                if issue != "blocking:rebar_revision_selection_required"
+                and issue != "previous_acceptance_blocked_after_reanalysis"
+            ]
+            if is_selected:
+                selected_count += 1
+                if (
+                    element.review_status
+                    in (
                         ReviewStatus.NEEDS_REVIEW,
                         ReviewStatus.REJECTED,
-                    ):
-                        element.review_status = ReviewStatus.PENDING
-                else:
-                    rejected_count += 1
-                    element.review_status = ReviewStatus.REJECTED
-                element.updated_at = utc_now()
-                connection.execute(
-                    "UPDATE elements SET review_status=?, data=? WHERE id=?",
-                    (
-                        element.review_status.value,
-                        element.model_dump_json(),
-                        element.id,
-                    ),
-                )
+                    )
+                    and "previous_acceptance_changed_after_reanalysis" not in element.issues
+                ):
+                    element.review_status = ReviewStatus.PENDING
+            else:
+                rejected_count += 1
+                element.review_status = ReviewStatus.REJECTED
+            element.updated_at = utc_now()
+            connection.execute(
+                "UPDATE elements SET review_status=?, data=? WHERE id=?",
+                (
+                    element.review_status.value,
+                    element.model_dump_json(),
+                    element.id,
+                ),
+            )
         return selected_count, rejected_count
 
     def list_assumptions(self) -> list[Assumption]:
@@ -1267,26 +1396,21 @@ class ProjectWorkspace:
         return [Assumption.model_validate_json(row["data"]) for row in rows]
 
     def replace_quantities(self, quantities: Iterable[QuantityLine]) -> None:
-        values = list(quantities)
-        valid_ids = {item.id for item in values}
         with self._connect() as connection:
-            connection.execute("DELETE FROM quantity_lines")
-            connection.executemany(
-                "INSERT INTO quantity_lines(id, element_id, data) VALUES (?, ?, ?)",
-                [(item.id, item.element_id, item.model_dump_json()) for item in values],
-            )
-            mapping_rows = connection.execute(
-                "SELECT id, quantity_line_id FROM price_mappings"
-            ).fetchall()
-            stale_mapping_ids = [
-                row["id"] for row in mapping_rows if row["quantity_line_id"] not in valid_ids
-            ]
-            if stale_mapping_ids:
-                marks = ",".join("?" for _ in stale_mapping_ids)
-                connection.execute(
-                    f"DELETE FROM price_mappings WHERE id IN ({marks})", stale_mapping_ids
-                )
-            connection.execute("DELETE FROM cost_lines")
+            self._replace_quantities(connection, list(quantities))
+
+    @staticmethod
+    def _replace_quantities(connection: sqlite3.Connection, values: list[QuantityLine]) -> None:
+        connection.execute("DELETE FROM quantity_lines")
+        connection.executemany(
+            "INSERT INTO quantity_lines(id, element_id, data) VALUES (?, ?, ?)",
+            [(item.id, item.element_id, item.model_dump_json()) for item in values],
+        )
+        connection.execute(
+            "DELETE FROM price_mappings WHERE quantity_line_id NOT IN "
+            "(SELECT id FROM quantity_lines)"
+        )
+        connection.execute("DELETE FROM cost_lines")
 
     def list_quantities(self) -> list[QuantityLine]:
         with self._connect() as connection:

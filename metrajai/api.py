@@ -246,7 +246,7 @@ class ProjectRegistry:
 
 def create_app(session_token: str | None = None) -> FastAPI:
     token = session_token or token_urlsafe(32)
-    app = FastAPI(title="MetrajAI Local Engine", version="1.3.1")
+    app = FastAPI(title="MetrajAI Local Engine", version="1.3.2")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
@@ -273,6 +273,19 @@ def create_app(session_token: str | None = None) -> FastAPI:
                 from fastapi.responses import JSONResponse
 
                 return JSONResponse(status_code=401, content={"detail": "Invalid session token"})
+            parts = request.url.path.strip("/").split("/")
+            if (
+                request.method not in {"GET", "HEAD"}
+                and len(parts) >= 3
+                and parts[0] == "projects"
+                and jobs.project_is_busy(parts[1])
+            ):
+                from fastapi.responses import JSONResponse
+
+                return JSONResponse(
+                    status_code=409,
+                    content={"detail": "Çalışan analiz tamamlanmadan proje değiştirilemez."},
+                )
         return await call_next(request)
 
     @app.get("/health")
@@ -391,6 +404,8 @@ def create_app(session_token: str | None = None) -> FastAPI:
             return workspace.confirm_source_unit(source_id, request.unit).model_dump(mode="json")
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.patch("/projects/{project_id}/sources/{source_id}/calibration")
     def confirm_calibration(
@@ -609,7 +624,12 @@ def create_app(session_token: str | None = None) -> FastAPI:
 
     @app.post("/projects/{project_id}/analyses", status_code=202)
     def start_analysis(project_id: str, request: AnalysisRequest):
-        run = jobs.start(registry.get(project_id), request.source_ids)
+        try:
+            run = jobs.start(registry.get(project_id), request.source_ids)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         return run.model_dump(mode="json")
 
     @app.get("/analyses/{run_id}")

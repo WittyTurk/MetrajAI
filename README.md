@@ -196,7 +196,7 @@ eleman ve manuel kontrol toplamları sağlandığında özel test alanında olu�
 
 ## Durum
 
-1.3.1 macOS pilotu, mimari/statik motoru kullanıcı paftalarından bağımsız ölçen açık
+1.3.2 macOS pilotu, mimari/statik motoru kullanıcı paftalarından bağımsız ölçen açık
 kaynak doğrulama laboratuvarını içerir. Şema ve EXPRESS doğrulaması temiz olan PCERT
 IFC4/IFC4.3, resmî IFC4 bileşenleri ve Duplex modelinden üretilen temiz, kör ve
 kontrollü zor DXF'ler karşılaştırılır. Kör dosyalar IFC kimliği taşımadığı için normal
@@ -212,5 +212,11 @@ Defterdarlık uygulama, asma tavan ve mahal matrisi birlikte incelemeye alınır
 Sütçüler mimari kaynakları ve üç projenin mühendis altın referansları tamamlanmadan
 mimari disiplin `reliable` durumuna geçirilmez. Mekanik ve elektrik kesin metrajı da
 küçük ve karmaşık gerçek proje doğrulamasına kadar kilitli kalır.
+
+Bu sürümde çok kaynaklı analiz tüm kaynaklar ve metraj hesapları tamamlanınca tek
+veritabanı işleminde yayımlanır. İptal veya hata önceki kesin sonuçları değiştirmez.
+Ölçüsü ya da geometrisi değişen onaylı elemanlar yeniden mühendis incelemesine döner;
+birim/ölçek değişiminde eski sonuçlar yedek alınarak geçersiz kılınır. Arayüz yalnız
+gerçekten değiştirilen ölçüleri elle düzeltme kaydına yazar ve analizi iptal edebilir.
 
 Copyright © 2026. All rights reserved.

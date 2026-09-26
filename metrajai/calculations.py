@@ -382,7 +382,9 @@ def calculate_quantities(
             missing = [
                 key
                 for key in definition.required
-                if key not in element.measurements or element.measurements[key] <= 0
+                if key not in element.measurements
+                or not math.isfinite(element.measurements[key])
+                or element.measurements[key] <= 0
             ]
             if missing:
                 if definition.optional:
@@ -398,7 +400,30 @@ def calculate_quantities(
                 )
                 continue
             variables = {key: float(element.measurements[key]) for key in definition.required}
-            quantity = definition.calculate(variables)
+            try:
+                quantity = definition.calculate(variables)
+            except (ArithmeticError, ValueError) as exc:
+                warnings.append(
+                    AnalysisWarning(
+                        code="QUANTITY_CALCULATION_FAILED",
+                        message=f"{element.id}: {definition.description}: {exc}",
+                        source_id=element.source_id,
+                        element_id=element.id,
+                        severity="error",
+                    )
+                )
+                continue
+            if not math.isfinite(quantity) or quantity < 0:
+                warnings.append(
+                    AnalysisWarning(
+                        code="NONFINITE_QUANTITY_EXCLUDED",
+                        message=f"{element.id}: {definition.description} geçersiz miktar üretti.",
+                        source_id=element.source_id,
+                        element_id=element.id,
+                        severity="error",
+                    )
+                )
+                continue
             quantities.append(
                 QuantityLine(
                     id=f"qty_{element.id.removeprefix('elm_')}_{index}",
@@ -441,7 +466,10 @@ def _append_rebar_additions(
         if assumption is None or not isinstance(assumption.value, (int, float)):
             continue
         percent = float(assumption.value)
-        if percent <= 0:
+        if not math.isfinite(percent) or percent <= 0:
+            continue
+        addition = base.quantity * percent / 100
+        if not math.isfinite(addition):
             continue
         quantities.append(
             QuantityLine(
@@ -453,7 +481,7 @@ def _append_rebar_additions(
                 category="Donatı",
                 description=description,
                 unit="kg",
-                quantity=base.quantity * percent / 100,
+                quantity=addition,
                 formula=f"net_rebar_kg * {key} / 100",
                 formula_key=f"rebar:{index}",
                 variables={"net_rebar_kg": base.quantity, key: percent},

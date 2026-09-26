@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
@@ -294,7 +295,9 @@ class DetectedElement(BaseModel):
         return [
             key
             for key in self.required_inputs
-            if key not in self.measurements or self.measurements[key] <= 0
+            if key not in self.measurements
+            or not math.isfinite(self.measurements[key])
+            or self.measurements[key] <= 0
         ]
 
 
@@ -338,8 +341,8 @@ class QuantityLine(BaseModel):
     @field_validator("quantity")
     @classmethod
     def quantity_is_non_negative(cls, value: float) -> float:
-        if value < 0:
-            raise ValueError("quantity cannot be negative")
+        if not math.isfinite(value) or value < 0:
+            raise ValueError("quantity must be finite and non-negative")
         return value
 
 

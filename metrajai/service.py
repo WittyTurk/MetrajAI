@@ -21,11 +21,13 @@ from .contracts import (
     AnalysisRun,
     AnalysisStatus,
     AnalysisWarning,
+    DetectedElement,
     Discipline,
     ElementEvidence,
     EvidenceKind,
     ReliabilityState,
     ReviewDecision,
+    ReviewStatus,
     SourceFile,
     SourceFormat,
     utc_now,
@@ -55,16 +57,27 @@ class EngineService:
         cancel_event: threading.Event | None = None,
         on_progress: ProgressCallback | None = None,
     ) -> AnalysisRun:
-        sources = self._resolve_sources(source_ids)
-        active_run = run or AnalysisRun(source_ids=[source.id for source in sources])
-        active_run.source_ids = [source.id for source in sources]
-        active_run.status = AnalysisStatus.RUNNING
-        active_run.message = "Kaynaklar analiz ediliyor"
-        active_run.updated_at = utc_now()
-        self._save_progress(active_run, on_progress)
+        requested_ids = list(source_ids) if source_ids is not None else None
+        active_run = run or AnalysisRun(source_ids=requested_ids or [])
         warnings: list[AnalysisWarning] = []
         try:
+            sources = self._resolve_sources(requested_ids)
+            active_run.source_ids = [source.id for source in sources]
+            active_run.status = AnalysisStatus.RUNNING
+            active_run.message = "Kaynaklar analiz ediliyor"
+            active_run.updated_at = utc_now()
+            self._save_progress(active_run, on_progress)
+            for source in sources:
+                if not self.workspace.verify_source_integrity(source):
+                    raise ValueError(
+                        f"Kaynak bütünlüğü doğrulanamadı: {source.original_name}. "
+                        "Dosya proje klasörüne alındıktan sonra değişmiş."
+                    )
             height_evidence: list[ArchitecturalHeightEvidence] = []
+            staged: list[tuple[SourceFile, list[DetectedElement], list[ElementEvidence]]] = []
+            context_by_source: dict[str, list[DetectedElement]] = {}
+            for element in self.workspace.list_elements():
+                context_by_source.setdefault(element.source_id, []).append(element)
             for source in sources:
                 if source.discipline != Discipline.ARCHITECTURAL:
                     continue
@@ -78,11 +91,6 @@ class EngineService:
 
             for index, source in enumerate(sources):
                 self._check_cancel(cancel_event)
-                if not self.workspace.verify_source_integrity(source):
-                    raise ValueError(
-                        f"Kaynak bütünlüğü doğrulanamadı: {source.original_name}. "
-                        "Dosya proje klasörüne alındıktan sonra değişmiş."
-                    )
                 if source.source_format == SourceFormat.DXF:
                     elements, source_warnings, detected_unit = self.analyzer.analyze(
                         source, self.workspace.source_path(source)
@@ -117,8 +125,9 @@ class EngineService:
                 if source.discipline == Discipline.ARCHITECTURAL:
                     context_elements = [
                         item
-                        for item in self.workspace.list_elements()
-                        if item.source_id != source.id
+                        for context_source_id, context_items in context_by_source.items()
+                        if context_source_id != source.id
+                        for item in context_items
                     ] + elements
                     context_elements = apply_architectural_assignments(
                         context_elements,
@@ -143,10 +152,9 @@ class EngineService:
                 )
                 source_warnings.extend(floor_warnings)
                 source.detected_unit = detected_unit
-                self.workspace.save_source(source)
-                self.workspace.replace_source_elements(source.id, elements)
+                element_evidence: list[ElementEvidence] = []
                 for element in elements:
-                    evidence = [
+                    element_evidence.append(
                         ElementEvidence(
                             element_id=element.id,
                             source_id=element.source_id,
@@ -165,9 +173,9 @@ class EngineService:
                             },
                             confidence=element.confidence,
                         )
-                    ]
-                    self.workspace.replace_element_evidence(element.id, evidence)
-                self.workspace.apply_rebar_revision_assumptions(source.id)
+                    )
+                staged.append((source, elements, element_evidence))
+                context_by_source[source.id] = elements
                 warnings.extend(source_warnings)
                 active_run.progress = (index + 1) / max(len(sources), 1) * 0.85
                 active_run.message = f"{source.original_name} analiz edildi"
@@ -175,7 +183,10 @@ class EngineService:
                 self._save_progress(active_run, on_progress)
 
             self._check_cancel(cancel_event)
-            quantity_warnings = self.refresh_quantities()
+            for source in sources:
+                if not self.workspace.verify_source_integrity(source):
+                    raise ValueError(f"Kaynak analiz sırasında değişti: {source.original_name}")
+            quantity_warnings = self.workspace.commit_analysis(staged, self._blocked_disciplines())
             warnings.extend(quantity_warnings)
             active_run.status = AnalysisStatus.COMPLETED
             active_run.progress = 1.0
@@ -218,6 +229,15 @@ class EngineService:
         skipped: dict[str, str] = {}
         for decision in decisions:
             try:
+                element = self.workspace.get_element(decision.element_id)
+                if (
+                    decision.status == ReviewStatus.ACCEPTED
+                    and "previous_acceptance_changed_after_reanalysis" in element.issues
+                ):
+                    skipped[decision.element_id] = (
+                        "Değişen ölçü ayrı mühendis incelemesi gerektirir"
+                    )
+                    continue
                 self.workspace.review_element(decision)
             except (KeyError, ValueError) as exc:
                 skipped[decision.element_id] = str(exc)
@@ -227,21 +247,23 @@ class EngineService:
         return reviewed, skipped
 
     def refresh_quantities(self) -> list[AnalysisWarning]:
+        quantities, warnings = calculate_quantities(
+            self.workspace.list_elements(),
+            self.workspace.list_assumptions(),
+            self._blocked_disciplines(),
+        )
+        self.workspace.replace_quantities(quantities)
+        return warnings
+
+    def _blocked_disciplines(self) -> set[Discipline]:
         gate_by_discipline = {
             gate.discipline: gate for gate in self.workspace.list_validation_gates()
         }
-        blocked_disciplines = {
+        return {
             discipline
             for discipline in (Discipline.MECHANICAL, Discipline.ELECTRICAL)
             if gate_by_discipline[discipline].state != ReliabilityState.RELIABLE
         }
-        quantities, warnings = calculate_quantities(
-            self.workspace.list_elements(),
-            self.workspace.list_assumptions(),
-            blocked_disciplines,
-        )
-        self.workspace.replace_quantities(quantities)
-        return warnings
 
     def _resolve_sources(self, source_ids: Iterable[str] | None) -> list[SourceFile]:
         if source_ids is None:
@@ -276,20 +298,28 @@ class BackgroundAnalysisManager:
             else [source.id for source in workspace.list_sources()]
         )
         run = AnalysisRun(source_ids=ids)
-        workspace.save_run(run)
         cancel_event = threading.Event()
-        future = self._executor.submit(
-            EngineService(workspace).analyze,
-            ids,
-            run=run,
-            cancel_event=cancel_event,
-        )
         with self._lock:
+            if any(
+                active_workspace.manifest.project_id == workspace.manifest.project_id
+                and not future.done()
+                for active_workspace, _, future in self._jobs.values()
+            ):
+                raise ValueError("Bu projede zaten çalışan bir analiz var")
+            workspace.save_run(run)
+            future = self._executor.submit(
+                EngineService(workspace).analyze,
+                ids,
+                run=run,
+                cancel_event=cancel_event,
+            )
             self._jobs[run.id] = (workspace, cancel_event, future)
         return run
 
     def cancel(self, run_id: str) -> AnalysisRun:
-        workspace, cancel_event, _ = self._job(run_id)
+        workspace, cancel_event, future = self._job(run_id)
+        if future.done():
+            return workspace.get_run(run_id)
         cancel_event.set()
         run = workspace.get_run(run_id)
         run.message = "İptal isteği alındı"

@@ -186,7 +186,16 @@ function App() {
         setRun(current);
       }
       await refresh();
-      if (current.status === "failed") setMessage(current.message);
+      if (["failed", "cancelled"].includes(current.status)) setMessage(current.message);
+    } catch (error) {
+      setMessage((error as Error).message);
+    }
+  }
+
+  async function cancelAnalysis() {
+    if (!api || !run || !["queued", "running"].includes(run.status)) return;
+    try {
+      setRun(await api.cancelAnalysis(run.id));
     } catch (error) {
       setMessage((error as Error).message);
     }
@@ -252,7 +261,8 @@ function App() {
                 <b>{Math.round(run.progress * 100)}%</b>
               </div>
             )}
-            <button className="button primary" disabled={sources.length === 0 || run?.status === "running"} onClick={() => void startAnalysis()}>
+            {run && ["queued", "running"].includes(run.status) && <button className="button secondary" onClick={() => void cancelAnalysis()}><CircleStop size={16} /> İptal et</button>}
+            <button className="button primary" disabled={sources.length === 0 || (run != null && ["queued", "running"].includes(run.status))} onClick={() => void startAnalysis()}>
               <Play size={16} fill="currentColor" /> Analizi başlat
             </button>
           </div>
@@ -262,8 +272,8 @@ function App() {
 
         {view === "sources" && <SourcesView api={api} project={project} sources={sources} onChanged={() => void refresh()} onNext={() => setView("floors")} onError={setMessage} />}
         {view === "floors" && <FloorsView api={api} projectId={project.project.project_id} sources={sources} elements={elements} floors={floors} repeatAssignments={repeatAssignments} onChanged={() => void refresh()} onError={setMessage} onNext={() => setView("mapping")} />}
-        {view === "mapping" && <MappingView api={api} projectId={project.project.project_id} sources={sources} onChanged={() => void refresh()} onNext={() => void startAnalysis()} />}
-        {view === "review" && <ReviewView api={api} projectId={project.project.project_id} elements={elements} assignments={architecturalAssignments} warnings={warnings} onChanged={() => void refresh()} onNext={() => setView("quantities")} />}
+        {view === "mapping" && <MappingView api={api} projectId={project.project.project_id} sources={sources} onChanged={() => void refresh()} onError={setMessage} onNext={() => void startAnalysis()} />}
+        {view === "review" && <ReviewView api={api} projectId={project.project.project_id} elements={elements} assignments={architecturalAssignments} warnings={warnings} onChanged={() => void refresh()} onError={setMessage} onNext={() => setView("quantities")} />}
         {view === "quantities" && <QuantitiesView api={api} projectId={project.project.project_id} quantities={quantities} pendingCount={pendingCount} onMessage={setMessage} />}
         {view === "commercial" && <CommercialView api={api} projectId={project.project.project_id} quantities={quantities} catalogs={priceCatalogs} priceItems={priceItems} mappings={priceMappings} scenarios={offerScenarios} gates={validationGates} onChanged={() => void refresh()} onError={setMessage} />}
         {view === "revisions" && <RevisionComparisonView api={api} projectId={project.project.project_id} sources={sources} />}
@@ -522,7 +532,7 @@ function FloorsView({ api, projectId, sources, elements, floors, repeatAssignmen
   </div>;
 }
 
-function MappingView({ api, projectId, sources, onChanged, onNext }: { api: EngineApi; projectId: string; sources: SourceFile[]; onChanged: () => void; onNext: () => void }) {
+function MappingView({ api, projectId, sources, onChanged, onError, onNext }: { api: EngineApi; projectId: string; sources: SourceFile[]; onChanged: () => void; onError: (message: string) => void; onNext: () => void }) {
   const dxfSources = sources.filter((source) => source.source_format === "dxf");
   const pdfSources = sources.filter((source) => source.source_format === "pdf");
   const unresolvedUnits = dxfSources.filter((source) => !source.unit_confirmed && source.detected_unit === "unknown" && !(source.discipline === "structural" && ["detail", "section", "elevation", "other"].includes(source.sheet_kind)));
@@ -535,7 +545,7 @@ function MappingView({ api, projectId, sources, onChanged, onNext }: { api: Engi
       <div className="section-heading"><div><span className="eyebrow">KAT VE PAFTA YÖNETİMİ</span><h2>Her dosyanın tek ve açık görevi</h2></div></div>
       <div className="sheet-mapping-list">{sources.map((source) => <SourceMappingEditor key={source.id} api={api} projectId={projectId} source={source} onChanged={onChanged} />)}</div>
     </section>
-    {dxfSources.length > 0 && <section className="panel"><div className="section-heading"><div><span className="eyebrow">BİRİM DOĞRULAMA</span><h2>DXF kaynakları metre standardına dönüştürülür</h2></div></div><div className="mapping-table"><div className="mapping-head"><span>Kaynak</span><span>DXF algısı</span><span>Kullanılacak birim</span><span>Durum</span></div>{dxfSources.map((source) => <div className="mapping-row" key={source.id}><div><strong>{source.original_name}</strong><small>{source.floor} · {source.role}</small></div><code>{source.detected_unit}</code><select value={source.unit_confirmed ? source.drawing_unit : source.detected_unit} onChange={async (event) => { const selected = event.target.value as DrawingUnit; if (selected !== "unknown") { await api.confirmUnit(projectId, source.id, selected); onChanged(); } }}><option value="unknown">Seçiniz</option><option value="mm">Milimetre</option><option value="cm">Santimetre</option><option value="m">Metre</option></select><span className={`status-dot-label ${source.unit_confirmed || source.detected_unit !== "unknown" ? "ok" : "warn"}`}><i />{source.unit_confirmed ? "Onaylandı" : source.detected_unit !== "unknown" ? "DXF değeri" : "Bekliyor"}</span></div>)}</div></section>}
+    {dxfSources.length > 0 && <section className="panel"><div className="section-heading"><div><span className="eyebrow">BİRİM DOĞRULAMA</span><h2>DXF kaynakları metre standardına dönüştürülür</h2></div></div><div className="mapping-table"><div className="mapping-head"><span>Kaynak</span><span>DXF algısı</span><span>Kullanılacak birim</span><span>Durum</span></div>{dxfSources.map((source) => <div className="mapping-row" key={source.id}><div><strong>{source.original_name}</strong><small>{source.floor} · {source.role}</small></div><code>{source.detected_unit}</code><select value={source.unit_confirmed ? source.drawing_unit : source.detected_unit} onChange={async (event) => { const selected = event.target.value as DrawingUnit; if (selected !== "unknown") { try { await api.confirmUnit(projectId, source.id, selected); onChanged(); } catch (error) { onError((error as Error).message); } } }}><option value="unknown">Seçiniz</option><option value="mm">Milimetre</option><option value="cm">Santimetre</option><option value="m">Metre</option></select><span className={`status-dot-label ${source.unit_confirmed || source.detected_unit !== "unknown" ? "ok" : "warn"}`}><i />{source.unit_confirmed ? "Onaylandı" : source.detected_unit !== "unknown" ? "DXF değeri" : "Bekliyor"}</span></div>)}</div></section>}
     {pdfSources.length > 0 && <section className="panel"><div className="section-heading"><div><span className="eyebrow">PDF KALİBRASYONU</span><h2>İki noktalı ölçek doğrulaması</h2></div></div><div className="sheet-mapping-list">{pdfSources.map((source) => <PdfCalibrationEditor key={source.id} api={api} projectId={projectId} source={source} onChanged={onChanged} />)}</div></section>}
     <div className="footer-action"><p>Yalnız onaylı eleman/şablon tekrarları uygulanır; çizelge ve detaylar körlemesine çoğaltılmaz.</p><button className="button primary" disabled={unresolvedCount > 0} onClick={onNext}><Play size={16} fill="currentColor" /> Tespitleri oluştur</button></div>
   </div>;
@@ -622,7 +632,7 @@ interface RebarRevisionCandidate {
   scope_labels: string[];
 }
 
-function ReviewView({ api, projectId, elements, assignments, warnings, onChanged, onNext }: { api: EngineApi; projectId: string; elements: DetectedElement[]; assignments: ArchitecturalAssignment[]; warnings: AnalysisWarning[]; onChanged: () => void; onNext: () => void }) {
+function ReviewView({ api, projectId, elements, assignments, warnings, onChanged, onError, onNext }: { api: EngineApi; projectId: string; elements: DetectedElement[]; assignments: ArchitecturalAssignment[]; warnings: AnalysisWarning[]; onChanged: () => void; onError: (message: string) => void; onNext: () => void }) {
   const [filter, setFilter] = useState<ReviewStatus | "all">("all");
   const [typeFilter, setTypeFilter] = useState<string>("all");
   const [floorFilter, setFloorFilter] = useState<string>("all");
@@ -648,8 +658,9 @@ function ReviewView({ api, projectId, elements, assignments, warnings, onChanged
   const pending = floorElements.filter((item) => ["pending", "needs_review"].includes(item.review_status)).length;
   const bulkEligible = filtered.filter((item) =>
     ["pending", "needs_review"].includes(item.review_status)
-    && item.required_inputs.every((key) => (item.measurements[key] ?? 0) > 0)
+    && item.required_inputs.every((key) => Number.isFinite(item.measurements[key]) && item.measurements[key] > 0)
     && !item.issues.some((issue) => issue.startsWith("blocking:"))
+    && !item.issues.includes("previous_acceptance_changed_after_reanalysis")
   );
   const scopeElements = floorElements.filter((item) =>
     item.review_status !== "rejected" && (typeFilter === "all" || item.element_type === typeFilter)
@@ -687,6 +698,8 @@ function ReviewView({ api, projectId, elements, assignments, warnings, onChanged
       const skippedCount = Object.keys(result.skipped).length;
       setResultMessage(`${result.reviewed_element_ids.length} eleman onaylandı${skippedCount ? `, ${skippedCount} güvenlik nedeniyle atlandı` : ""}.`);
       onChanged();
+    } catch (error) {
+      onError((error as Error).message);
     } finally {
       setBusy(false);
     }
@@ -705,6 +718,8 @@ function ReviewView({ api, projectId, elements, assignments, warnings, onChanged
       );
       setResultMessage(`Revizyon ${candidate.label} seçildi; ${result.selected_element_count} donatı pozu onaya açıldı.`);
       onChanged();
+    } catch (error) {
+      onError((error as Error).message);
     } finally {
       setBusy(false);
     }
@@ -736,7 +751,7 @@ function ReviewView({ api, projectId, elements, assignments, warnings, onChanged
       <div className="element-strip">{filtered.map((element) => <button key={element.id} className={selected?.id === element.id ? "selected" : ""} onClick={() => setSelectedId(element.id)}><span className={`status-pin ${element.review_status}`} /><strong>{elementTypeLabel(element.element_type)}{element.properties.element_label ? ` · ${String(element.properties.element_label)}` : ""}</strong><small>{element.floor} · {element.layer}</small></button>)}</div>
       {typeFilter !== "all" && <div className="bulk-review"><div><strong>Güvenli toplu onay</strong><small>{bulkEligible.length} görünür eleman uygun; eksik/engelli satırlar dahil edilmez.</small></div><input value={bulkReason} onChange={(event) => setBulkReason(event.target.value)} placeholder="Pafta ve kontrol gerekçesi…" /><button className="button primary" disabled={busy || bulkEligible.length === 0 || bulkReason.trim().length < 3} onClick={() => void bulkAccept()}><Check size={16} /> {bulkEligible.length} elemanı onayla</button></div>}
       {resultMessage && <div className="inline-result"><Check size={15} />{resultMessage}</div>}
-      {selected ? <ElementReview api={api} projectId={projectId} element={selected} allElements={elements} assignments={assignments} onChanged={onChanged} /> : <EmptyState icon={<Ruler />} title="Bu filtrede tespit yok" detail="Tür veya durum filtresini değiştirin." />}
+      {selected ? <ElementReview api={api} projectId={projectId} element={selected} allElements={elements} assignments={assignments} onChanged={onChanged} onError={onError} /> : <EmptyState icon={<Ruler />} title="Bu filtrede tespit yok" detail="Tür veya durum filtresini değiştirin." />}
       <div className="review-footer"><span>{elements.filter((item) => item.review_status === "accepted").length} onaylı eleman kesin metraja girecek.</span><button className="button secondary" onClick={onNext}>Kesin metrajı gör <ChevronRight size={16} /></button></div>
     </section>
   </div>;
@@ -788,7 +803,7 @@ function quantitySummary(element: DetectedElement) {
   return lines.length ? lines.map((line) => `${line.category}: ${formatQuantity(line.value)} ${line.unit}`).join(" · ") : "Hesap dışında";
 }
 
-function ElementReview({ api, projectId, element, allElements, assignments, onChanged }: { api: EngineApi; projectId: string; element: DetectedElement; allElements: DetectedElement[]; assignments: ArchitecturalAssignment[]; onChanged: () => void }) {
+function ElementReview({ api, projectId, element, allElements, assignments, onChanged, onError }: { api: EngineApi; projectId: string; element: DetectedElement; allElements: DetectedElement[]; assignments: ArchitecturalAssignment[]; onChanged: () => void; onError: (message: string) => void }) {
   const keys = element.required_inputs;
   const [values, setValues] = useState<Record<string, string>>({});
   const [reason, setReason] = useState("");
@@ -804,13 +819,18 @@ function ElementReview({ api, projectId, element, allElements, assignments, onCh
     setHostWallId(String(element.properties.host_wall_id ?? ""));
     setRoomIds((element.properties.adjacent_room_ids as string[] | undefined) ?? []);
     setBoundaryId(String(element.properties.boundary_element_id ?? ""));
-  }, [element.id]);
+  }, [element]);
   async function decide(status: ReviewStatus) {
     setBusy(true);
     try {
-      const overrides = Object.fromEntries(Object.entries(values).filter(([, value]) => value !== "").map(([key, value]) => [key, Number(value)]));
-      await api.review(projectId, element.id, status, overrides, reason || (status === "accepted" ? "Geometri ve ölçüler kontrol edildi" : "Mühendis kararı"));
+      const overrides = Object.fromEntries(Object.entries(values).filter(([key, value]) => value !== "" && Number(value) !== element.measurements[key]).map(([key, value]) => [key, Number(value)]));
+      const reviewReason = element.issues.includes("previous_acceptance_changed_after_reanalysis") && status === "accepted"
+        ? reason.trim()
+        : reason || (status === "accepted" ? "Geometri ve ölçüler kontrol edildi" : "Mühendis kararı");
+      await api.review(projectId, element.id, status, overrides, reviewReason);
       onChanged();
+    } catch (error) {
+      onError((error as Error).message);
     } finally { setBusy(false); }
   }
   async function saveRelation(kind: "room_boundary" | "opening_host" | "opening_rooms", targets: string[]) {
@@ -827,6 +847,8 @@ function ElementReview({ api, projectId, element, allElements, assignments, onCh
         reason: relationReason.trim(),
       });
       onChanged();
+    } catch (error) {
+      onError((error as Error).message);
     } finally { setBusy(false); }
   }
   const missing = element.required_inputs.filter((key) => !values[key] || Number(values[key]) <= 0);
@@ -913,6 +935,9 @@ function ElementReview({ api, projectId, element, allElements, assignments, onCh
       {blocking.length > 0 && (
         <div className="missing-note"><AlertTriangle size={17} /><span>{blockingMessage}</span></div>
       )}
+      {element.issues.includes("previous_acceptance_changed_after_reanalysis") && (
+        <div className="missing-note"><AlertTriangle size={17} /><span>Ölçü veya geometri son analizde değişti. Kaynak paftayı yeniden kontrol edip bu elemanı ayrı onaylayın.</span></div>
+      )}
       {heightEvidence && (
         <div className="evidence-note"><Ruler size={17} /><span><strong>Mimari kesitten yükseklik adayı</strong>{heightEvidence.floor_label}: {formatSigned(heightEvidence.lower_level_m)} → {formatSigned(heightEvidence.upper_level_m)} = {formatQuantity(heightEvidence.height_m)} m<small>{heightEvidence.source_name} · {heightEvidence.block_name} bloğu</small></span></div>
       )}
@@ -958,7 +983,7 @@ function ElementReview({ api, projectId, element, allElements, assignments, onCh
       <label>Karar gerekçesi<textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Kontrol edilen pafta, kesit veya düzeltme notu…" /></label>
       <div className="decision-actions">
         <button className="button danger-ghost" disabled={busy} onClick={() => void decide("rejected")}><CircleStop size={16} />Hariç tut</button>
-        <button className="button primary" disabled={busy || missing.length > 0 || blocking.length > 0} onClick={() => void decide("accepted")}><Check size={16} />Onayla ve hesaba kat</button>
+        <button className="button primary" disabled={busy || missing.length > 0 || blocking.length > 0 || (element.issues.includes("previous_acceptance_changed_after_reanalysis") && reason.trim().length < 3)} onClick={() => void decide("accepted")}><Check size={16} />Onayla ve hesaba kat</button>
       </div>
     </div>
   );
