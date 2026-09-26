@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="MetrajAI plan logosu">
+  <rect width="1024" height="1024" rx="220" fill="#182427"/>
+  <path d="M236 244H696V388H788V744H236Z" fill="none" stroke="#f4f1e8" stroke-width="54" stroke-linejoin="round"/>
+  <path d="M236 510H478V244M478 510H788M478 510V744" fill="none" stroke="#f4f1e8" stroke-width="42" stroke-linejoin="round"/>
+  <rect x="540" y="296" width="105" height="42" rx="9" fill="#eea13d"/>
+  <path d="M236 834H788M236 804V864M512 815V853M788 804V864" fill="none" stroke="#eea13d" stroke-width="20" stroke-linecap="round"/>
+</svg>
