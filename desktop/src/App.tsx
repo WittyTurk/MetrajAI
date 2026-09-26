@@ -1,17 +1,20 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   AlertTriangle,
+  ArrowLeft,
   BadgeDollarSign,
   Boxes,
   Check,
   ChevronRight,
   CircleStop,
+  Clock3,
   FilePlus2,
   FileSpreadsheet,
   Focus,
   FolderOpen,
+  FolderPlus,
   Gauge,
   GitCompareArrows,
   LoaderCircle,
@@ -27,6 +30,8 @@ import {
 } from "lucide-react";
 import { EngineApi } from "./api";
 import logoMark from "../app-icon.svg";
+import { readRecentProjects, rememberRecentProject, removeRecentProject } from "./recentProjects";
+import type { RecentProject } from "./recentProjects";
 import type {
   AnalysisRun,
   AnalysisWarning,
@@ -114,6 +119,7 @@ const MEASUREMENT_LABELS: Record<string, string> = {
 };
 
 function App() {
+  const activeProjectId = useRef<string | null>(null);
   const [api, setApi] = useState<EngineApi | null>(null);
   const [engineError, setEngineError] = useState("");
   const [project, setProject] = useState<ProjectSummary | null>(null);
@@ -159,6 +165,7 @@ function App() {
         api.validationGates(projectId),
         api.architecturalAssignments(projectId),
       ]);
+    if (activeProjectId.current !== projectId) return;
     setProject(summary);
     setSources(nextSources);
     setElements(nextElements);
@@ -211,6 +218,21 @@ function App() {
       <ProjectStart
         api={api}
         onReady={(summary) => {
+          activeProjectId.current = summary.project.project_id;
+          setSources([]);
+          setElements([]);
+          setQuantities([]);
+          setWarnings([]);
+          setFloors([]);
+          setRepeatAssignments([]);
+          setArchitecturalAssignments([]);
+          setPriceCatalogs([]);
+          setPriceItems([]);
+          setPriceMappings([]);
+          setOfferScenarios([]);
+          setValidationGates([]);
+          setRun(null);
+          setMessage("");
           setProject(summary);
           setView("sources");
           void refresh(summary.project.project_id);
@@ -221,6 +243,7 @@ function App() {
 
   const pendingCount =
     (project.review_counts.pending ?? 0) + (project.review_counts.needs_review ?? 0);
+  const analysisActive = run != null && ["queued", "running"].includes(run.status);
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -232,6 +255,17 @@ function App() {
           <span>Aktif proje</span>
           <strong>{project.project.name}</strong>
           <small>{sources.length} kaynak · {elements.length} eleman</small>
+          <button
+            className="project-switch"
+            disabled={analysisActive}
+            title={analysisActive ? "Analiz tamamlanınca proje değiştirebilirsiniz" : "Proje seçimine dön"}
+            onClick={() => {
+              activeProjectId.current = null;
+              setProject(null);
+              setRun(null);
+              setMessage("");
+            }}
+          ><FolderOpen size={14} /> Projelere dön</button>
         </div>
         <nav className="workflow-nav" aria-label="İş akışı">
           <NavItem index="01" label="Kaynak dosyalar" active={view === "sources"} complete={sources.length > 0} onClick={() => setView("sources")} />
@@ -298,31 +332,56 @@ function EngineGate({ error }: { error: string }) {
 }
 
 function ProjectStart({ api, onReady }: { api: EngineApi; onReady: (project: ProjectSummary) => void }) {
-  const [mode, setMode] = useState<"create" | "open">("create");
-  const [path, setPath] = useState("");
+  const [mode, setMode] = useState<"home" | "create" | "open">("home");
+  const [createPath, setCreatePath] = useState("");
+  const [openPath, setOpenPath] = useState("");
   const [name, setName] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [busyPath, setBusyPath] = useState<string | null>(null);
+  const [recentError, setRecentError] = useState<{ path: string; message: string } | null>(null);
+  const [recentProjects, setRecentProjects] = useState<RecentProject[]>(() => readRecentProjects());
+
+  function changeMode(nextMode: "home" | "create" | "open") {
+    setMode(nextMode);
+    setError("");
+    setRecentError(null);
+  }
 
   async function chooseFolder() {
+    if (mode === "home") return;
     const title = mode === "create" ? "Yeni proje klasörünü seçin" : "MetrajAI proje klasörünü seçin";
     setError("");
     try {
       const selected = isTauri()
         ? await open({ directory: true, multiple: false, title })
         : (await api.selectDirectory(title)).path;
-      if (typeof selected === "string") setPath(selected);
+      if (typeof selected === "string") {
+        if (mode === "create") setCreatePath(selected);
+        else setOpenPath(selected);
+      }
     } catch (dialogError) {
       setError((dialogError as Error).message);
     }
   }
 
-  async function submit() {
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (mode === "home") return;
+    const path = (mode === "create" ? createPath : openPath).trim();
     if (!path || (mode === "create" && !name.trim())) return;
     setBusy(true);
     setError("");
     try {
-      onReady(mode === "create" ? await api.createProject(path, name.trim()) : await api.openProject(path));
+      const summary = mode === "create"
+        ? await api.createProject(path, name.trim())
+        : await api.openProject(path);
+      setRecentProjects(rememberRecentProject({
+        projectId: summary.project.project_id,
+        name: summary.project.name,
+        path,
+      }));
+      onReady(summary);
     } catch (requestError) {
       setError((requestError as Error).message);
     } finally {
@@ -330,27 +389,187 @@ function ProjectStart({ api, onReady }: { api: EngineApi; onReady: (project: Pro
     }
   }
 
+  async function openRecent(project: RecentProject) {
+    if (busy || busyPath) return;
+    setBusyPath(project.path);
+    setRecentError(null);
+    try {
+      const summary = await api.openProject(project.path);
+      setRecentProjects(rememberRecentProject({
+        projectId: summary.project.project_id,
+        name: summary.project.name,
+        path: project.path,
+      }));
+      onReady(summary);
+    } catch (requestError) {
+      setRecentError({ path: project.path, message: (requestError as Error).message });
+    } finally {
+      setBusyPath(null);
+    }
+  }
+
+  const currentPath = mode === "create" ? createPath : openPath;
+  const actionBusy = busy || busyPath !== null;
+
   return (
     <div className="start-screen">
       <section className="start-intro">
         <div className="brand light"><img className="brand-mark" src={logoMark} alt="MetrajAI logosu" /><strong>MetrajAI</strong></div>
-        <div>
+        <div className="intro-main">
           <span className="eyebrow">MÜHENDİS KONTROLLÜ · YEREL · İZLENEBİLİR</span>
           <h1>Çizimden kesin metraja,<br />her karar görünür.</h1>
-          <p>DXF tespitlerini kaynağına kadar izleyin, eksikleri doğrulayın ve yalnız onaylı elemanlardan metraj üretin.</p>
+          <p>Projelerinize kaldığınız yerden dönün. Kaynakları, mühendis kararlarını ve metraj çıktılarını aynı çalışma alanında yönetin.</p>
+          <div className="intro-steps" aria-label="MetrajAI iş akışı">
+            <div><span>01</span><strong>Kaynağı ekle</strong><small>DXF, Excel ve PDF paftaları</small></div>
+            <div><span>02</span><strong>Tespitleri doğrula</strong><small>Ölçü ve varsayımlar görünür</small></div>
+            <div><span>03</span><strong>Metrajı üret</strong><small>Yalnız onaylı elemanlardan</small></div>
+          </div>
         </div>
-        <div className="intro-metrics"><span><b>%100</b> yerel veri</span><span><b>0</b> görünmez varsayım</span><span><b>1</b> denetlenebilir kayıt</span></div>
+        <div className="intro-local"><ShieldCheck size={19} /><span>Dosyalarınız ve proje geçmişiniz bu Mac'te kalır.</span></div>
       </section>
-      <section className="start-form">
-        <div className="mode-switch"><button className={mode === "create" ? "active" : ""} onClick={() => setMode("create")}>Yeni proje</button><button className={mode === "open" ? "active" : ""} onClick={() => setMode("open")}>Projeyi aç</button></div>
-        <h2>{mode === "create" ? "Çalışma alanı oluşturun" : "Çalışma alanına dönün"}</h2>
-        <p>{mode === "create" ? "Kaynaklar, kararlar ve çıktılar seçtiğiniz klasörde birlikte saklanır." : "manifest.json içeren mevcut bir MetrajAI klasörü seçin."}</p>
-        {mode === "create" && <label>Proje adı<input value={name} onChange={(event) => setName(event.target.value)} placeholder="Örn. Taziye Evi Pilot" /></label>}
-        <label>Proje klasörü<div className="path-picker"><input value={path} onChange={(event) => setPath(event.target.value)} placeholder="Bir klasör seçin veya yolu yazın" /><button onClick={() => void chooseFolder()}><FolderOpen size={17} /></button></div></label>
-        {error && <div className="inline-error">{error}</div>}
-        <button className="button primary wide" onClick={() => void submit()} disabled={busy || !path || (mode === "create" && !name.trim())}>{busy ? <LoaderCircle className="spin" size={17} /> : <ChevronRight size={17} />}{mode === "create" ? "Projeyi oluştur" : "Projeyi aç"}</button>
-      </section>
+      <main className="start-main">
+        <div className="start-content">
+          {mode === "home" ? (
+            <>
+              <div className="start-heading">
+                <span className="eyebrow">ÇALIŞMA ALANINIZ</span>
+                <h2>Projelerinize hoş geldiniz</h2>
+                <p>Devam etmek istediğiniz projeyi seçin veya yeni bir çalışma alanı oluşturun.</p>
+              </div>
+              <div className="start-action-grid">
+                <button className="start-action start-action-primary" onClick={() => changeMode("create")}>
+                  <span className="start-action-icon"><FolderPlus size={24} /></span>
+                  <span><strong>Yeni proje</strong><small>Yeni bir çalışma klasörüyle başlayın</small></span>
+                  <ChevronRight size={19} />
+                </button>
+                <button className="start-action" onClick={() => changeMode("open")}>
+                  <span className="start-action-icon"><FolderOpen size={24} /></span>
+                  <span><strong>Klasörden aç</strong><small>Mevcut MetrajAI projenize dönün</small></span>
+                  <ChevronRight size={19} />
+                </button>
+              </div>
+              <RecentProjects
+                projects={recentProjects}
+                busy={actionBusy}
+                busyPath={busyPath}
+                error={recentError}
+                onOpen={(project) => void openRecent(project)}
+                onRemove={(path) => {
+                  setRecentProjects(removeRecentProject(path));
+                  if (recentError?.path === path) setRecentError(null);
+                }}
+                onBrowse={() => changeMode("open")}
+              />
+            </>
+          ) : (
+            <>
+              <button className="start-back" onClick={() => changeMode("home")} disabled={actionBusy}><ArrowLeft size={16} /> Projelere dön</button>
+              <div className="start-heading">
+                <span className="eyebrow">{mode === "create" ? "YENİ ÇALIŞMA ALANI" : "MEVCUT ÇALIŞMA ALANI"}</span>
+                <h2>{mode === "create" ? "Yeni proje oluşturun" : "Projenizi açın"}</h2>
+                <p>{mode === "create"
+                  ? "Projeye bir ad verin ve dosyalarının saklanacağı klasörü seçin."
+                  : "MetrajAI proje klasörünü seçin veya aşağıdaki son açılanlardan devam edin."}</p>
+              </div>
+              <div className="start-mode-tabs" role="group" aria-label="Proje işlemi">
+                <button className={mode === "create" ? "active" : ""} onClick={() => changeMode("create")} disabled={actionBusy}>Yeni proje</button>
+                <button className={mode === "open" ? "active" : ""} onClick={() => changeMode("open")} disabled={actionBusy}>Projeyi aç</button>
+              </div>
+              <form className="start-project-form" onSubmit={(event) => void submit(event)}>
+                {mode === "create" && (
+                  <div className="start-field">
+                    <label htmlFor="project-name">Proje adı</label>
+                    <input id="project-name" value={name} onChange={(event) => setName(event.target.value)} placeholder="Örn. Taziye Evi" autoFocus required />
+                    <small>Bu ad proje listesinde ve raporlarda görünür.</small>
+                  </div>
+                )}
+                <div className="start-field">
+                  <label htmlFor="project-path">Proje klasörü</label>
+                  <div className="start-path-picker">
+                    <input
+                      id="project-path"
+                      value={currentPath}
+                      onChange={(event) => mode === "create" ? setCreatePath(event.target.value) : setOpenPath(event.target.value)}
+                      placeholder={mode === "create" ? "Boş bir klasör seçin veya yolunu yazın" : "MetrajAI proje klasörünü seçin"}
+                      spellCheck={false}
+                      required
+                    />
+                    <button type="button" onClick={() => void chooseFolder()} disabled={actionBusy} aria-label="Proje klasörünü seç"><FolderOpen size={19} /></button>
+                  </div>
+                  <small>{mode === "create"
+                    ? "MetrajAI kaynakları, kararları ve çıktıları seçtiğiniz klasöre kaydeder."
+                    : "Klasörün içinde MetrajAI manifest.json dosyası bulunmalı."}</small>
+                </div>
+                {error && <div className="start-error" role="alert"><AlertTriangle size={17} /><span>{error}</span></div>}
+                <button className="button primary start-submit" type="submit" disabled={actionBusy || !currentPath.trim() || (mode === "create" && !name.trim())}>
+                  {busy ? <LoaderCircle className="spin" size={18} /> : mode === "create" ? <FolderPlus size={18} /> : <FolderOpen size={18} />}
+                  {mode === "create" ? "Projeyi oluştur" : "Projeyi aç"}
+                  {!busy && <ChevronRight size={17} />}
+                </button>
+              </form>
+              {mode === "open" && (
+                <RecentProjects
+                  projects={recentProjects}
+                  busy={actionBusy}
+                  busyPath={busyPath}
+                  error={recentError}
+                  onOpen={(project) => void openRecent(project)}
+                  onRemove={(path) => {
+                    setRecentProjects(removeRecentProject(path));
+                    if (recentError?.path === path) setRecentError(null);
+                  }}
+                  onBrowse={() => void chooseFolder()}
+                />
+              )}
+              {mode === "create" && <div className="start-form-note"><ShieldCheck size={18} /><span>Yeni proje oluşturmak mevcut projelerinizi değiştirmez.</span></div>}
+            </>
+          )}
+        </div>
+      </main>
     </div>
+  );
+}
+
+function RecentProjects({ projects, busy, busyPath, error, onOpen, onRemove, onBrowse }: {
+  projects: RecentProject[];
+  busy: boolean;
+  busyPath: string | null;
+  error: { path: string; message: string } | null;
+  onOpen: (project: RecentProject) => void;
+  onRemove: (path: string) => void;
+  onBrowse: () => void;
+}) {
+  return (
+    <section className="recent-section" aria-label="Son açılan projeler">
+      <div className="recent-heading"><div><Clock3 size={18} /><h3>Son açılan projeler</h3></div><span>{projects.length}</span></div>
+      {projects.length === 0 ? (
+        <div className="recent-empty">
+          <FolderOpen size={24} />
+          <strong>Henüz kayıtlı proje yok</strong>
+          <p>Önceki sürümde oluşturduğunuz bir projeyi klasöründen bir kez açın; sonraki açılışlarda burada görünecek.</p>
+          <button type="button" onClick={onBrowse}>Klasörden proje aç <ChevronRight size={15} /></button>
+        </div>
+      ) : (
+        <div className="recent-list">
+          {projects.map((project) => (
+            <div className={`recent-row ${error?.path === project.path ? "has-error" : ""}`} key={project.path}>
+              <button className="recent-open" type="button" onClick={() => onOpen(project)} disabled={busy}>
+                <span className="recent-icon"><FolderOpen size={20} /></span>
+                <span className="recent-details">
+                  <strong>{project.name}</strong>
+                  <small title={project.path}>{project.path}</small>
+                  <em>Son açılış: {new Intl.DateTimeFormat("tr-TR", { day: "numeric", month: "short", year: "numeric" }).format(new Date(project.openedAt))}</em>
+                </span>
+                {busyPath === project.path ? <LoaderCircle className="spin" size={18} /> : <ChevronRight size={18} />}
+              </button>
+              <button className="recent-remove" type="button" onClick={() => onRemove(project.path)} disabled={busy} title="Yalnız listeden kaldır; proje dosyaları silinmez" aria-label={`${project.name} projesini son açılanlar listesinden kaldır`}><X size={16} /></button>
+              {error?.path === project.path && <div className="recent-row-error" role="alert">{error.message} <span>Konumu kontrol edin veya listeden kaldırın.</span></div>}
+            </div>
+          ))}
+        </div>
+      )}
+      {projects.length > 0 && <p className="recent-footnote">Bir projeyi listeden kaldırmak klasördeki dosyalarını silmez.</p>}
+    </section>
   );
 }
 

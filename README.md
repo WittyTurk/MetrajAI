@@ -166,6 +166,12 @@ artifact-tool doğrulama yolu da desteklenir. Bu pilot yalnız macOS için paket
 Pilot `.app` yerel ad-hoc kimlikle imzalanır ve paket bütünlüğü doğrulanabilir; Apple
 notarizasyonu ile Developer ID imzası ticari dağıtım aşamasına bırakılmıştır.
 
+Başlangıç ekranı son açılan en fazla sekiz projenin adını, klasörünü ve son açılış
+tarihini yalnız cihazdaki uygulama deposunda tutar. Önceki sürümlerde açılmış bir
+proje, klasöründen bir kez yeniden seçildikten sonra listeye eklenir. Listeden
+kaldırma yalnız kısayolu siler; proje dosyalarını silmez. Aktif analiz sürerken
+proje değiştirme kapalıdır.
+
 ## Test kapsamı
 
 Yeni test paketi aşağıdaki riskleri kapsar:
