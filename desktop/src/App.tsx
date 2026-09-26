@@ -26,6 +26,7 @@ import {
   ZoomOut,
 } from "lucide-react";
 import { EngineApi } from "./api";
+import logoMark from "../app-icon.svg";
 import type {
   AnalysisRun,
   AnalysisWarning,
@@ -224,7 +225,7 @@ function App() {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark"><Ruler size={21} /></div>
+          <img className="brand-mark" src={logoMark} alt="MetrajAI logosu" />
           <div><strong>MetrajAI</strong><span>Mühendis kontrollü metraj</span></div>
         </div>
         <div className="project-chip">
@@ -286,7 +287,7 @@ function EngineGate({ error }: { error: string }) {
   return (
     <div className="gate">
       <div className="gate-card">
-        <div className="brand-mark large"><Ruler size={28} /></div>
+        <img className="brand-mark large" src={logoMark} alt="MetrajAI logosu" />
         <p className="eyebrow">METRAJAI YEREL MOTOR</p>
         <h1>{error ? "Motor başlatılamadı" : "Hesap motoru hazırlanıyor"}</h1>
         <p>{error || "Dosyalarınız cihazdan çıkmadan güvenli çalışma alanı kuruluyor."}</p>
@@ -332,7 +333,7 @@ function ProjectStart({ api, onReady }: { api: EngineApi; onReady: (project: Pro
   return (
     <div className="start-screen">
       <section className="start-intro">
-        <div className="brand light"><div className="brand-mark"><Ruler size={21} /></div><strong>MetrajAI</strong></div>
+        <div className="brand light"><img className="brand-mark" src={logoMark} alt="MetrajAI logosu" /><strong>MetrajAI</strong></div>
         <div>
           <span className="eyebrow">MÜHENDİS KONTROLLÜ · YEREL · İZLENEBİLİR</span>
           <h1>Çizimden kesin metraja,<br />her karar görünür.</h1>

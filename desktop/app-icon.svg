@@ -1,6 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <rect width="1024" height="1024" rx="224" fill="#171d1e"/>
-  <path d="M218 750V278L512 590L806 278V750" fill="none" stroke="#f0a13a" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M218 820H806" fill="none" stroke="#eef0ed" stroke-width="42" stroke-linecap="round"/>
-  <path d="M294 820V764M402 820V784M512 820V764M622 820V784M730 820V764" fill="none" stroke="#eef0ed" stroke-width="34" stroke-linecap="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="MetrajAI logosu">
+  <rect width="1024" height="1024" rx="220" fill="#f5f2e9"/>
+  <path d="M239 706V310L512 553L785 310V706" fill="none" stroke="#182427" stroke-width="82" stroke-linecap="square" stroke-linejoin="round"/>
+  <path d="M512 553L785 310" fill="none" stroke="#e99a37" stroke-width="82" stroke-linecap="square" stroke-linejoin="round"/>
+  <path d="M239 794H785" fill="none" stroke="#182427" stroke-width="26" stroke-linecap="round"/>
+  <path d="M239 759V829M376 775V813M512 759V829M648 775V813M785 759V829" fill="none" stroke="#e99a37" stroke-width="22" stroke-linecap="round"/>
 </svg>
