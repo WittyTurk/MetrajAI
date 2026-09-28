@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import asdict
 from decimal import Decimal
 
 from .commercial import calculate_offer
+from .structural_readiness import structural_completion_blockers
 from .workspace import ProjectWorkspace
 
 
@@ -20,6 +22,7 @@ def _json_value(value):
 def build_report_payload(workspace: ProjectWorkspace) -> dict:
     sources = workspace.list_sources()
     elements = workspace.list_elements()
+    completion_blockers = structural_completion_blockers(elements)
     quantities = workspace.list_quantities()
     assumptions = workspace.list_assumptions()
     warnings = workspace.list_warnings()
@@ -53,6 +56,9 @@ def build_report_payload(workspace: ProjectWorkspace) -> dict:
                 "category": category,
                 "unit": unit,
                 "quantity": quantity,
+                "status": "partial"
+                if discipline == "structural" and completion_blockers
+                else "approved",
             }
             for (discipline, category, unit), quantity in sorted(totals.items())
         ],
@@ -61,6 +67,10 @@ def build_report_payload(workspace: ProjectWorkspace) -> dict:
         "quantities": [item.model_dump(mode="json") for item in quantities],
         "assumptions": [item.model_dump(mode="json") for item in assumptions],
         "warnings": [item.model_dump(mode="json") for item in warnings],
+        "completion": {
+            "structural_complete": not completion_blockers,
+            "blockers": [asdict(item) for item in completion_blockers],
+        },
         "review_history": [item.model_dump(mode="json") for item in workspace.list_reviews()],
         "floors": [item.model_dump(mode="json") for item in workspace.list_floors()],
         "sheet_assignments": [

@@ -222,11 +222,11 @@ DEFINITIONS: dict[str, tuple[QuantityDefinition, ...]] = {
         ),
         QuantityDefinition(
             "Mimari",
-            "Duvar hacmi",
+            "Duvar hacmi (açıklıklar düşülmüş)",
             "m³",
-            "length_m * height_m * thickness_m",
-            ("length_m", "height_m", "thickness_m"),
-            lambda v: v["length_m"] * v["height_m"] * v["thickness_m"],
+            "net_area_m2 * thickness_m",
+            ("net_area_m2", "thickness_m"),
+            lambda v: v["net_area_m2"] * v["thickness_m"],
             optional=True,
         ),
     ),
@@ -300,6 +300,102 @@ def derive_element_measurements(element: DetectedElement) -> None:
             values["net_area_m2"] = values["area_m2"]
 
 
+def resolved_opening_area(
+    element: DetectedElement, by_id: dict[str, DetectedElement]
+) -> float | None:
+    """Return the area intersecting this surface, or None if evidence is incomplete."""
+    ids = element.properties.get("opening_element_ids", [])
+    if not isinstance(ids, list):
+        return None
+    area = 0.0
+    for opening_id in ids:
+        opening = by_id.get(str(opening_id))
+        if opening is None:
+            return None
+        if opening.review_status == ReviewStatus.REJECTED:
+            continue
+        if opening.review_status != ReviewStatus.ACCEPTED or any(
+            issue.startswith("blocking:") for issue in opening.issues
+        ):
+            return None
+        value = opening.measurements.get("opening_area_m2", 0.0)
+        if not math.isfinite(value) or value <= 0:
+            return None
+        if (
+            element.element_type == "finish_area"
+            and element.properties.get("band_bottom_m") is not None
+        ):
+            sill = opening.measurements.get("sill_height_m")
+            width = opening.measurements.get("width_m", 0.0)
+            height = opening.measurements.get("height_m", 0.0)
+            bottom = float(element.properties["band_bottom_m"])
+            band_height = float(element.properties.get("band_height_m", 0.0))
+            if (
+                sill is None
+                or not all(math.isfinite(v) for v in (sill, width, height, bottom, band_height))
+                or sill < 0
+                or width <= 0
+                or height <= 0
+                or band_height <= 0
+            ):
+                return None
+            overlap = max(0.0, min(bottom + band_height, sill + height) - max(bottom, sill))
+            value = width * overlap
+        area += value
+    return round(area, 6)
+
+
+def synchronize_opening_dependencies(
+    elements: Iterable[DetectedElement],
+) -> list[DetectedElement]:
+    """Recalculate dependent net areas after opening decisions; revoke stale approval."""
+    values = list(elements)
+    by_id = {item.id: item for item in values}
+    for element in values:
+        ids = element.properties.get("opening_element_ids", [])
+        if element.element_type not in {"wall", "finish_area"} or not ids:
+            continue
+        total = resolved_opening_area(element, by_id)
+        if total is None:
+            if "blocking:opening_decision_required" not in element.issues:
+                element.issues.append("blocking:opening_decision_required")
+            if element.review_status == ReviewStatus.ACCEPTED:
+                element.review_status = ReviewStatus.NEEDS_REVIEW
+            continue
+        element.issues = [
+            issue
+            for issue in element.issues
+            if issue
+            not in {
+                "blocking:opening_decision_required",
+                "blocking:opening_vertical_position_required",
+            }
+        ]
+        deducted = total
+        prior_deducted = element.measurements.get("opening_area_m2", 0.0)
+        changed = not math.isclose(prior_deducted, deducted, rel_tol=1e-8, abs_tol=1e-6)
+        element.properties["opening_area_basis_m2"] = total
+        element.measurements["opening_area_m2"] = deducted
+        if element.element_type == "wall":
+            derive_element_measurements(element)
+        else:
+            gross = element.measurements.get("gross_area_m2", 0.0)
+            net = round(max(0.0, gross - deducted), 6)
+            element.measurements["net_area_m2"] = net
+            element.measurements["area_m2"] = net
+            if net <= 0 and "blocking:finish_area_missing" not in element.issues:
+                element.issues.append("blocking:finish_area_missing")
+            elif net > 0:
+                element.issues = [
+                    issue for issue in element.issues if issue != "blocking:finish_area_missing"
+                ]
+        if changed and element.review_status == ReviewStatus.ACCEPTED:
+            element.review_status = ReviewStatus.NEEDS_REVIEW
+            if "previous_acceptance_changed_after_reanalysis" not in element.issues:
+                element.issues.append("previous_acceptance_changed_after_reanalysis")
+    return values
+
+
 def _value_of(key: str) -> Callable[[dict[str, float]], float]:
     def calculate(values: dict[str, float]) -> float:
         return values[key]
@@ -349,8 +445,46 @@ def calculate_quantities(
     quantities: list[QuantityLine] = []
     warnings: list[AnalysisWarning] = []
     locked = blocked_disciplines or set()
-    for element in elements:
+    values = list(elements)
+    by_id = {item.id: item for item in values}
+    for element in values:
         if element.review_status != ReviewStatus.ACCEPTED:
+            continue
+        if element.element_type in {"wall", "finish_area"} and element.properties.get(
+            "opening_element_ids"
+        ):
+            dependency_area = resolved_opening_area(element, by_id)
+            basis = element.properties.get("opening_area_basis_m2")
+            if (
+                dependency_area is None
+                or not isinstance(basis, (int, float))
+                or not math.isclose(dependency_area, basis, rel_tol=1e-8, abs_tol=1e-6)
+            ):
+                warnings.append(
+                    AnalysisWarning(
+                        code="OPENING_DEPENDENCY_NOT_RECONCILED",
+                        message=(
+                            "Açıklık kararları veya ölçüleri değişti; bağlı duvar/kaplama "
+                            "kesin metraja alınmadı."
+                        ),
+                        source_id=element.source_id,
+                        element_id=element.id,
+                        severity="error",
+                    )
+                )
+                continue
+        if element.properties.get("evidence_only") or any(
+            issue.startswith("blocking:") for issue in element.issues
+        ):
+            warnings.append(
+                AnalysisWarning(
+                    code="ACCEPTED_ELEMENT_HAS_UNRESOLVED_EVIDENCE",
+                    message="Kanıt adayı veya engelli eleman kesin metraja alınmadı.",
+                    source_id=element.source_id,
+                    element_id=element.id,
+                    severity="error",
+                )
+            )
             continue
         if element.discipline in locked:
             warnings.append(

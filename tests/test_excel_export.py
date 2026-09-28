@@ -20,6 +20,7 @@ from metrajai.contracts import (
     ReviewStatus,
 )
 from metrajai.excel_export import export_traceable_excel
+from metrajai.reporting import build_report_payload
 from metrajai.workspace import ProjectWorkspace
 
 
@@ -35,6 +36,78 @@ def test_excel_export_uses_bundled_python_runtime_without_private_node(
     try:
         assert len(workbook.sheetnames) == 11
         assert "Mimari Kırılım" in workbook.sheetnames
+    finally:
+        workbook.close()
+
+
+def test_excel_keeps_schedule_net_and_gross_plan_area_separate(tmp_path: Path) -> None:
+    workspace = ProjectWorkspace.create(tmp_path / "project", "Alan dayanağı")
+    drawing = tmp_path / "plan.dxf"
+    drawing.write_text("synthetic", encoding="utf-8")
+    source = workspace.add_source(drawing, discipline=Discipline.ARCHITECTURAL, role="mimari")
+    room = DetectedElement(
+        id="ZK01", source_id=source.id, discipline=Discipline.ARCHITECTURAL,
+        element_type="room", geometry=Geometry(kind="room_boundary"),
+        measurements={"area_m2": 9.33, "geometric_area_m2": 10.719,
+                      "gross_region_area_m2": 10.719},
+        properties={"room_code": "ZK01", "room_area_basis": "schedule_net_gross_plan"},
+        required_inputs=["area_m2"], review_status=ReviewStatus.ACCEPTED,
+    )
+    workspace.replace_source_elements(source.id, [room])
+    workbook = load_workbook(export_traceable_excel(workspace), data_only=False)
+    try:
+        sheet = workbook["Mimari Kırılım"]
+        assert sheet["H5"].value == pytest.approx(9.33)
+        assert sheet["J5"].value == "=MAX(0,H5-I5)"
+        assert sheet["S5"].value == pytest.approx(10.719)
+        assert sheet["T5"].value == "schedule_net_gross_plan"
+    finally:
+        workbook.close()
+
+
+def test_structural_report_marks_partial_scope_until_raft_and_rebar_are_resolved(
+    tmp_path: Path,
+) -> None:
+    workspace = ProjectWorkspace.create(tmp_path / "project", "Statik")
+    drawing = tmp_path / "plan.dxf"
+    drawing.write_text("synthetic", encoding="utf-8")
+    source = workspace.add_source(drawing, discipline=Discipline.STRUCTURAL, role="kalip")
+    column = DetectedElement(
+        id="column", source_id=source.id, discipline=Discipline.STRUCTURAL,
+        element_type="column", geometry=Geometry(kind="rectangle", bbox=(0, 0, 0.4, 0.6)),
+        measurements={"width_m": 0.4, "depth_m": 0.6, "height_m": 3},
+        required_inputs=["width_m", "depth_m", "height_m"],
+        review_status=ReviewStatus.ACCEPTED,
+    )
+    raft = DetectedElement(
+        id="raft", source_id=source.id, discipline=Discipline.STRUCTURAL,
+        element_type="raft", geometry=Geometry(kind="closed_outline", bbox=(0, 0, 10, 10)),
+        measurements={"area_m2": 100}, required_inputs=["area_m2", "thickness_m"],
+    )
+    rebar = DetectedElement(
+        id="rebar", source_id=source.id, discipline=Discipline.STRUCTURAL,
+        element_type="rebar", geometry=Geometry(kind="schedule_row"),
+        properties={"revision_candidates": [{"label": "A"}, {"label": "B"}]},
+    )
+    workspace.replace_source_elements(source.id, [column, raft, rebar])
+    lines, _ = calculate_quantities([column, raft, rebar])
+    workspace.replace_quantities(lines)
+
+    payload = build_report_payload(workspace)
+    assert payload["completion"]["structural_complete"] is False
+    assert {item["code"] for item in payload["completion"]["blockers"]} == {
+        "RAFT_THICKNESS_REQUIRED", "REBAR_REVISION_REQUIRED",
+    }
+    assert all(item["status"] == "partial" for item in payload["summary"])
+
+    workbook = load_workbook(export_traceable_excel(workspace), read_only=False)
+    try:
+        assert workbook["Özet"]["F5"].value == "Kısmi · statik kapsam eksik"
+        warning_codes = {
+            workbook["Uyarılar"].cell(row, 2).value
+            for row in range(5, workbook["Uyarılar"].max_row + 1)
+        }
+        assert {"RAFT_THICKNESS_REQUIRED", "REBAR_REVISION_REQUIRED"} <= warning_codes
     finally:
         workbook.close()
 
@@ -133,6 +206,7 @@ def test_excel_export_contains_traceable_offer_and_correct_stair_formulas(
             "Birim Fiyatlar",
             "Teklif Senaryosu",
             "Teklif Özeti",
+            "Mimari Kırılım",
         ]
         metraj = workbook["Metraj"]
         formula_by_key = {

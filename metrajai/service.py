@@ -92,9 +92,17 @@ class EngineService:
             for index, source in enumerate(sources):
                 self._check_cancel(cancel_event)
                 if source.source_format == SourceFormat.DXF:
-                    elements, source_warnings, detected_unit = self.analyzer.analyze(
-                        source, self.workspace.source_path(source)
-                    )
+                    if source.discipline == Discipline.ARCHITECTURAL:
+                        elements, source_warnings, detected_unit = self.analyzer.analyze(
+                            source, self.workspace.source_path(source),
+                            architectural_assignments=self.workspace.list_architectural_assignments(
+                                source_id=source.id
+                            ),
+                        )
+                    else:
+                        elements, source_warnings, detected_unit = self.analyzer.analyze(
+                            source, self.workspace.source_path(source)
+                        )
                 else:
                     elements, source_warnings, detected_unit = analyze_non_dxf_source(
                         source, self.workspace.source_path(source)
@@ -248,7 +256,7 @@ class EngineService:
 
     def refresh_quantities(self) -> list[AnalysisWarning]:
         quantities, warnings = calculate_quantities(
-            self.workspace.list_elements(),
+            self.workspace.synchronize_opening_dependencies(),
             self.workspace.list_assumptions(),
             self._blocked_disciplines(),
         )

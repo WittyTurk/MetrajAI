@@ -32,6 +32,7 @@ export type MappingStatus = "suggested" | "approved" | "rejected";
 export type ReliabilityState = "experimental" | "needs_review" | "approved" | "reliable";
 export type ArchitecturalAssignmentKind =
   | "room_boundary"
+  | "room_area_basis"
   | "opening_host"
   | "opening_rooms"
   | "finish_policy";
@@ -76,9 +77,25 @@ export interface SourceInspection {
   unit_conflict: boolean;
   requires_unit_confirmation: boolean;
   unit_evidence: string[];
+  unit_evidence_basis: "header" | "structural_sections" | "architectural_area" | "geometry_only" | "not_applicable";
   area_ratio: number | null;
   suggested_discipline: Discipline | null;
   discipline_evidence: string[];
+  suggested_sheet_kind: SheetKind | null;
+  sheet_evidence: string[];
+  suggested_floor: string | null;
+  suggested_floor_kind: FloorKind | null;
+}
+
+export interface SourceDrawingPreview {
+  source_id: string;
+  region_id: string;
+  unit: DrawingUnit;
+  bounds: [number, number, number, number] | null;
+  strokes: { points: [number, number][]; role: "wall" | "opening" | "room" | "annotation" | "other"; layer: string }[];
+  texts: { x: number; y: number; text: string; height_m: number }[];
+  truncated: boolean;
+  next_offset: number | null;
 }
 
 export interface FloorDefinition {
@@ -152,7 +169,9 @@ export interface AnalysisWarning {
   code: string;
   message: string;
   severity: "info" | "warning" | "error";
+  source_id: string;
   element_id: string;
+  evidence: Record<string, string | number | boolean>;
 }
 
 export interface AnalysisRun {

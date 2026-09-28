@@ -16,6 +16,7 @@ from ezdxf.path.nesting import make_polygon_structure
 
 from ..contracts import (
     AnalysisWarning,
+    ArchitecturalAssignment,
     DetectedElement,
     Discipline,
     DrawingUnit,
@@ -25,7 +26,11 @@ from ..contracts import (
     SourceFile,
 )
 from ..units import unit_from_insunits, unit_scale
-from .architectural_plan import extract_architectural_plan, reconcile_architectural_elements
+from .architectural_plan import (
+    apply_architectural_assignments,
+    extract_architectural_plan,
+    reconcile_architectural_elements,
+)
 from .architectural_schedule import extract_architectural_schedules
 from .foundation_plan import extract_foundation_application_plans
 from .multiview_structural import (
@@ -218,6 +223,8 @@ class DxfAnalyzer:
         self,
         source: SourceFile,
         source_path: str | Path,
+        *,
+        architectural_assignments: list[ArchitecturalAssignment] | None = None,
     ) -> tuple[list[DetectedElement], list[AnalysisWarning], DrawingUnit]:
         path = Path(source_path)
         if path.suffix.lower() != ".dxf":
@@ -239,24 +246,30 @@ class DxfAnalyzer:
 
         document = ezdxf.readfile(path)
         detected_unit = unit_from_insunits(document.header.get("$INSUNITS", 0))
-        inspection = inspect_dxf_document(document, source.original_name)
+        inspection = inspect_dxf_document(
+            document,
+            source.original_name,
+            check_area=source.discipline == Discipline.STRUCTURAL,
+        )
         if (
             source.discipline == Discipline.STRUCTURAL
             and inspection["suggested_discipline"] == Discipline.ARCHITECTURAL.value
         ):
             return (
                 [],
-                [AnalysisWarning(
-                    code="SOURCE_DISCIPLINE_CONFLICT",
-                    message=(
-                        f"{source.original_name}: pafta başlıkları mimari plan/kesit bağlamını "
-                        "gösteriyor; statik kolon/kiriş tespiti durduruldu. Kaynağı Mimari "
-                        "olarak eşleyin veya statik paftayı ayrıca ekleyin."
-                    ),
-                    source_id=source.id,
-                    severity="error",
-                    evidence={"suggested_discipline": "architectural"},
-                )],
+                [
+                    AnalysisWarning(
+                        code="SOURCE_DISCIPLINE_CONFLICT",
+                        message=(
+                            f"{source.original_name}: pafta başlıkları mimari plan/kesit bağlamını "
+                            "gösteriyor; statik kolon/kiriş tespiti durduruldu. Kaynağı Mimari "
+                            "olarak eşleyin veya statik paftayı ayrıca ekleyin."
+                        ),
+                        source_id=source.id,
+                        severity="error",
+                        evidence={"suggested_discipline": "architectural"},
+                    )
+                ],
                 detected_unit,
             )
         if source.discipline == Discipline.STRUCTURAL and source.sheet_kind in {
@@ -283,6 +296,51 @@ class DxfAnalyzer:
             )
         chosen_unit = source.drawing_unit if source.unit_confirmed else detected_unit
         warnings: list[AnalysisWarning] = []
+        evidenced_unit = (
+            DrawingUnit(inspection["suggested_unit"])
+            if inspection["unit_evidence_basis"] == "structural_sections"
+            else DrawingUnit.UNKNOWN
+        )
+        unit_evidence_conflict = (
+            evidenced_unit != DrawingUnit.UNKNOWN
+            and chosen_unit != DrawingUnit.UNKNOWN
+            and chosen_unit != evidenced_unit
+        )
+        if unit_evidence_conflict:
+            warnings.append(
+                AnalysisWarning(
+                    code="UNIT_EVIDENCE_CONFLICT",
+                    message=(
+                        f"{source.original_name}: seçilen {chosen_unit.value} birimi, "
+                        f"yazılı kesit/geometri kanıtının önerdiği {evidenced_unit.value} "
+                        "birimiyle çelişiyor. Bu kaynağın elemanları kesin metraja "
+                        "alınmaz; birimi doğrulayıp analizi yeniden çalıştırın."
+                    ),
+                    source_id=source.id,
+                    severity="error",
+                    evidence={
+                        "chosen_unit": chosen_unit.value,
+                        "suggested_unit": evidenced_unit.value,
+                        "unit_evidence": " | ".join(inspection["unit_evidence"]),
+                    },
+                )
+            )
+        elif evidenced_unit != DrawingUnit.UNKNOWN and chosen_unit == evidenced_unit:
+            warnings.append(
+                AnalysisWarning(
+                    code="UNIT_EVIDENCE_VERIFIED",
+                    message=(
+                        f"{source.original_name}: {chosen_unit.value} birimi, yazılı kesit "
+                        "ölçüleri ve plan geometrisiyle uyumlu."
+                    ),
+                    source_id=source.id,
+                    severity="info",
+                    evidence={
+                        "suggested_unit": evidenced_unit.value,
+                        "unit_evidence": " | ".join(inspection["unit_evidence"]),
+                    },
+                )
+            )
         if chosen_unit == DrawingUnit.UNKNOWN:
             warnings.append(
                 AnalysisWarning(
@@ -299,16 +357,27 @@ class DxfAnalyzer:
         else:
             scale = unit_scale(chosen_unit)
         if detected_unit != DrawingUnit.UNKNOWN and chosen_unit != detected_unit:
-            warnings.append(AnalysisWarning(
-                code="DXF_HEADER_UNIT_OVERRIDE",
-                message=(
-                    f"{source.original_name}: DXF başlığı {detected_unit.value}, kullanıcı "
-                    f"onayı {chosen_unit.value}. Farklı birim kanıtları raporda görünür; "
-                    "bilinen bir pafta ölçüsüyle doğrulayın."
-                ),
-                source_id=source.id,
-                evidence={"header_unit": detected_unit.value, "chosen_unit": chosen_unit.value},
-            ))
+            warnings.append(
+                AnalysisWarning(
+                    code="DXF_HEADER_UNIT_OVERRIDE",
+                    message=(
+                        f"{source.original_name}: DXF başlığı {detected_unit.value}, kullanıcı "
+                        f"onayı {chosen_unit.value}. "
+                        + (
+                            "Yazılı kesit ve geometri kanıtı seçilen birimi destekliyor."
+                            if evidenced_unit == chosen_unit
+                            else "Farklı birim kanıtlarını bilinen bir pafta ölçüsüyle doğrulayın."
+                        )
+                    ),
+                    source_id=source.id,
+                    severity="info" if evidenced_unit == chosen_unit else "warning",
+                    evidence={
+                        "header_unit": detected_unit.value,
+                        "chosen_unit": chosen_unit.value,
+                        "verified_by_drawing": evidenced_unit == chosen_unit,
+                    },
+                )
+            )
 
         reference_elements, reference_warnings, reference_activated = extract_reference_dxf(
             document,
@@ -317,6 +386,8 @@ class DxfAnalyzer:
         )
         if reference_activated:
             warnings.extend(reference_warnings)
+            if unit_evidence_conflict:
+                self._block_unit_conflict(reference_elements)
             return reference_elements, warnings, detected_unit
 
         if source.discipline == Discipline.ARCHITECTURAL:
@@ -411,6 +482,12 @@ class DxfAnalyzer:
         if source.discipline == Discipline.ARCHITECTURAL:
             schedule_result = extract_architectural_schedules(document, source)
             if schedule_result.elements:
+                for room in schedule_result.elements:
+                    room.properties["room_schedule_total_area_m2"] = schedule_result.room_area_m2
+                    room.properties["reference_net_area_m2"] = schedule_result.reference_net_area_m2
+                    room.properties["reference_gross_area_m2"] = (
+                        schedule_result.reference_gross_area_m2
+                    )
                 elements.extend(schedule_result.elements)
                 warnings.extend(schedule_result.warnings)
             plan_elements, plan_warnings = extract_architectural_plan(document, source, chosen_unit)
@@ -480,6 +557,8 @@ class DxfAnalyzer:
         elements.extend(generic_elements)
 
         if source.discipline == Discipline.ARCHITECTURAL:
+            if architectural_assignments:
+                elements = apply_architectural_assignments(elements, architectural_assignments)
             elements, reconciliation_warnings = reconcile_architectural_elements(source, elements)
             warnings.extend(reconciliation_warnings)
 
@@ -520,7 +599,16 @@ class DxfAnalyzer:
                     source_id=source.id,
                 )
             )
+        if unit_evidence_conflict:
+            self._block_unit_conflict(elements)
         return elements, warnings, detected_unit
+
+    @staticmethod
+    def _block_unit_conflict(elements: list[DetectedElement]) -> None:
+        for element in elements:
+            if "blocking:drawing_unit_evidence_mismatch" not in element.issues:
+                element.issues.append("blocking:drawing_unit_evidence_mismatch")
+            element.review_status = ReviewStatus.NEEDS_REVIEW
 
     @staticmethod
     def _filter_multi_view_structural_regions(
@@ -820,17 +908,19 @@ class DxfAnalyzer:
         if block is None:
             return False
         has_closed_outline = any(
-            item.dxftype() == "LWPOLYLINE" and bool(item.closed)
-            for item in block
+            item.dxftype() == "LWPOLYLINE" and bool(item.closed) for item in block
         )
         if has_closed_outline:
             return False
         return any(
             item.dxftype() in {"TEXT", "MTEXT"}
-            and ("%%P" in str(getattr(item.dxf, "text", "")) or re.fullmatch(
-                r"[+\-±]?\d+(?:[.,]\d+)?",
-                normalize_name(str(getattr(item.dxf, "text", ""))),
-            ))
+            and (
+                "%%P" in str(getattr(item.dxf, "text", ""))
+                or re.fullmatch(
+                    r"[+\-±]?\d+(?:[.,]\d+)?",
+                    normalize_name(str(getattr(item.dxf, "text", ""))),
+                )
+            )
             for item in block
         )
 

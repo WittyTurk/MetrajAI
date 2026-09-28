@@ -95,6 +95,7 @@ class EvidenceKind(StrEnum):
 
 class ArchitecturalAssignmentKind(StrEnum):
     ROOM_BOUNDARY = "room_boundary"
+    ROOM_AREA_BASIS = "room_area_basis"
     OPENING_HOST = "opening_host"
     OPENING_ROOMS = "opening_rooms"
     FINISH_POLICY = "finish_policy"

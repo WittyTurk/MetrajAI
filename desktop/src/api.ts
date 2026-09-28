@@ -20,6 +20,7 @@ import type {
   RepeatAssignment,
   SheetKind,
   SourceFile,
+  SourceDrawingPreview,
   SourceInspection,
   ValidationGate,
 } from "./types";
@@ -111,6 +112,16 @@ export class EngineApi {
       method: "POST",
       body: JSON.stringify({ path }),
     });
+  }
+
+  inspectProjectSource(projectId: string, sourceId: string) {
+    return this.request<SourceInspection>(`/projects/${projectId}/sources/${sourceId}/inspection`);
+  }
+
+  sourcePreview(projectId: string, sourceId: string, regionId: string, strokeOffset = 0, focusBBox?: [number, number, number, number]) {
+    const query = new URLSearchParams({ region_id: regionId, stroke_offset: String(strokeOffset) });
+    if (focusBBox) query.set("focus_bbox", focusBBox.join(","));
+    return this.request<SourceDrawingPreview>(`/projects/${projectId}/sources/${sourceId}/preview?${query}`);
   }
 
   project(projectId: string) {

@@ -252,7 +252,7 @@ class ProjectRegistry:
 
 def create_app(session_token: str | None = None) -> FastAPI:
     token = session_token or token_urlsafe(32)
-    app = FastAPI(title="MetrajAI Local Engine", version="1.3.7")
+    app = FastAPI(title="MetrajAI Local Engine", version="1.3.16")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
@@ -391,6 +391,48 @@ def create_app(session_token: str | None = None) -> FastAPI:
     @app.get("/projects/{project_id}/sources")
     def list_sources(project_id: str):
         return [item.model_dump(mode="json") for item in registry.get(project_id).list_sources()]
+
+    @app.get("/projects/{project_id}/sources/{source_id}/inspection")
+    def inspect_project_source(project_id: str, source_id: str):
+        workspace = registry.get(project_id)
+        try:
+            source = workspace.get_source(source_id)
+            if not workspace.verify_source_integrity(source):
+                raise ValueError("Kaynak dosyanın SHA-256 bütünlüğü doğrulanamadı")
+            return inspect_source_file(workspace.source_path(source))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (OSError, ValueError, ezdxf.DXFError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/projects/{project_id}/sources/{source_id}/preview")
+    def source_preview(
+        project_id: str,
+        source_id: str,
+        region_id: str = "",
+        stroke_offset: int = 0,
+        focus_bbox: str = "",
+    ):
+        from .source_preview import build_source_preview
+
+        workspace = registry.get(project_id)
+        try:
+            source = workspace.get_source(source_id)
+            if not workspace.verify_source_integrity(source):
+                raise ValueError("Kaynak dosyanın SHA-256 bütünlüğü doğrulanamadı")
+            focus = None
+            if focus_bbox:
+                values = [float(value) for value in focus_bbox.split(",")]
+                if len(values) != 4:
+                    raise ValueError("Odak sınırı dört koordinat içermelidir")
+                focus = (values[0], values[1], values[2], values[3])
+            return build_source_preview(
+                source, workspace.source_path(source), region_id, stroke_offset, focus
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (ValueError, ezdxf.DXFError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.delete("/projects/{project_id}/sources/{source_id}")
     def delete_source(project_id: str, source_id: str):
@@ -596,6 +638,10 @@ def create_app(session_token: str | None = None) -> FastAPI:
             item = workspace.put_architectural_assignment(
                 ArchitecturalAssignment(project_id=project_id, **request.model_dump())
             )
+            if item.kind.value == "room_boundary":
+                # A consumed boundary is restored from the source on the next analysis.
+                # Do not present the old reconciled rows as an updated result.
+                return item.model_dump(mode="json")
             assignments = workspace.list_architectural_assignments(source_id=item.source_id)
             elements = apply_architectural_assignments(workspace.list_elements(), assignments)
             source = workspace.get_source(item.source_id)

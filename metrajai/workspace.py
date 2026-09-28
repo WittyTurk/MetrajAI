@@ -11,7 +11,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .analyzers.source_inspection import inspect_source_file
-from .calculations import calculate_quantities, derive_element_measurements
+from .calculations import (
+    calculate_quantities,
+    derive_element_measurements,
+    resolved_opening_area,
+    synchronize_opening_dependencies,
+)
 from .contracts import (
     AnalysisRun,
     AnalysisWarning,
@@ -762,9 +767,73 @@ class ProjectWorkspace:
             raise ValueError("Mimari ilişki yalnız mimari kaynakta kurulabilir")
         if subject.discipline != Discipline.ARCHITECTURAL:
             raise ValueError("Mimari ilişki yalnız mimari eleman için kurulabilir")
-        targets = [self.get_element(element_id) for element_id in assignment.target_element_ids]
-        if any(target.discipline != Discipline.ARCHITECTURAL for target in targets):
-            raise ValueError("Mimari ilişki hedefleri mimari eleman olmalıdır")
+        if assignment.kind.value == "room_boundary":
+            candidate_ids = {
+                str(item.get("id"))
+                for item in subject.properties.get("boundary_candidates", [])
+                if isinstance(item, dict)
+            }
+            target_id = (
+                assignment.target_element_ids[0] if len(assignment.target_element_ids) == 1 else ""
+            )
+            stored_target = next(
+                (item for item in self.list_elements() if item.id == target_id), None
+            )
+            target_is_physical = bool(
+                stored_target
+                and stored_target.source_id == source.id
+                and stored_target.discipline == Discipline.ARCHITECTURAL
+                and stored_target.element_type == "room"
+                and stored_target.geometry.kind == "room_boundary"
+            )
+            if (
+                subject.element_type != "room"
+                or subject.source_id != source.id
+                or not target_id
+                or target_id == subject.id
+                or (target_id not in candidate_ids and not target_is_physical)
+            ):
+                raise ValueError("Mahal sınırı aynı kaynağın tek bir plan sınırı adayı olmalıdır")
+        elif assignment.kind.value == "room_area_basis":
+            from .analyzers.architectural_plan import gross_net_area_evidence
+
+            if (
+                subject.element_type != "room"
+                or subject.source_id != source.id
+                or not subject.properties.get("schedule_evidence")
+                or assignment.target_element_ids
+                or assignment.values
+                != {
+                    "net_area_source": "schedule",
+                    "plan_area_role": "gross",
+                }
+                or gross_net_area_evidence(self.list_elements(source_id=source.id), source.id)
+                is None
+            ):
+                raise ValueError(
+                    "Çizelge neti yalnız tüm mahal sınırları brüt alan kanıtıyla "
+                    "uzlaştığında, kaynak ve gerekçeyle onaylanabilir"
+                )
+        else:
+            targets = [self.get_element(element_id) for element_id in assignment.target_element_ids]
+            if any(target.discipline != Discipline.ARCHITECTURAL for target in targets):
+                raise ValueError("Mimari ilişki hedefleri mimari eleman olmalıdır")
+            if assignment.kind.value == "opening_host" and (
+                subject.element_type not in {"door", "window"}
+                or len(targets) != 1
+                or targets[0].element_type != "wall"
+                or targets[0].properties.get("evidence_only")
+            ):
+                raise ValueError("Açıklığın taşıyıcı hedefi tek bir gerçek duvar olmalıdır")
+            if assignment.kind.value == "opening_rooms" and (
+                subject.element_type not in {"door", "window"}
+                or not 1 <= len(targets) <= 2
+                or any(
+                    target.element_type != "room" or target.properties.get("evidence_only")
+                    for target in targets
+                )
+            ):
+                raise ValueError("Açıklığın komşu mahalleri çizelgeyle eşleşmiş mahal olmalıdır")
         if assignment.approved and (
             not assignment.reviewer.strip() or len(assignment.reason.strip()) < 3
         ):
@@ -1046,10 +1115,7 @@ class ProjectWorkspace:
                     ],
                 )
                 self._apply_rebar_revision_assumptions(connection, source.id)
-            current_elements = [
-                DetectedElement.model_validate_json(row["data"])
-                for row in connection.execute("SELECT data FROM elements ORDER BY rowid").fetchall()
-            ]
+            current_elements = self._synchronize_opening_dependencies(connection)
             assumption_rows = connection.execute(
                 "SELECT data FROM assumptions ORDER BY rowid"
             ).fetchall()
@@ -1059,6 +1125,26 @@ class ProjectWorkspace:
             )
             self._replace_quantities(connection, quantities)
         return warnings
+
+    @staticmethod
+    def _synchronize_opening_dependencies(
+        connection: sqlite3.Connection,
+    ) -> list[DetectedElement]:
+        rows = connection.execute("SELECT id, data FROM elements ORDER BY rowid").fetchall()
+        elements = [DetectedElement.model_validate_json(row["data"]) for row in rows]
+        synchronize_opening_dependencies(elements)
+        for row, element in zip(rows, elements, strict=True):
+            serialized = element.model_dump_json()
+            if serialized != row["data"]:
+                connection.execute(
+                    "UPDATE elements SET review_status=?, data=? WHERE id=?",
+                    (element.review_status.value, serialized, row["id"]),
+                )
+        return elements
+
+    def synchronize_opening_dependencies(self) -> list[DetectedElement]:
+        with self._connect() as connection:
+            return self._synchronize_opening_dependencies(connection)
 
     def _replace_source_elements(
         self,
@@ -1082,13 +1168,9 @@ class ProjectWorkspace:
                 "(SELECT id FROM quantity_lines WHERE element_id=?)",
                 stale_params,
             )
-            connection.executemany(
-                "DELETE FROM quantity_lines WHERE element_id=?", stale_params
-            )
+            connection.executemany("DELETE FROM quantity_lines WHERE element_id=?", stale_params)
             connection.executemany("DELETE FROM reviews WHERE element_id=?", stale_params)
-            connection.executemany(
-                "DELETE FROM element_evidence WHERE element_id=?", stale_params
-            )
+            connection.executemany("DELETE FROM element_evidence WHERE element_id=?", stale_params)
             connection.executemany(
                 "DELETE FROM architectural_assignments WHERE subject_element_id=?",
                 stale_params,
@@ -1215,6 +1297,22 @@ class ProjectWorkspace:
             element.measurements[key] = float(value)
         derive_element_measurements(element)
         if decision.status == ReviewStatus.ACCEPTED:
+            if element.element_type in {"wall", "finish_area"} and element.properties.get(
+                "opening_element_ids"
+            ):
+                related = {item.id: item for item in self.list_elements()}
+                dependency_area = resolved_opening_area(element, related)
+                if dependency_area is None:
+                    raise ValueError(
+                        "Bağlı kapı/pencere kararları tamamlanmadan bu alan onaylanamaz"
+                    )
+                if not math.isclose(
+                    float(element.properties.get("opening_area_basis_m2", -1)),
+                    dependency_area,
+                    rel_tol=1e-8,
+                    abs_tol=1e-6,
+                ):
+                    raise ValueError("Açıklık ölçüsü değişti; bağlı alanı yeniden hesaplayın")
             if (
                 "previous_acceptance_changed_after_reanalysis" in element.issues
                 and len(decision.reason.strip()) < 3

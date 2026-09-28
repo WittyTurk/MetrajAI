@@ -69,6 +69,7 @@ const {
   price_catalogs: priceCatalogs = [], price_items: priceItems = [],
   price_mappings: priceMappings = [], offers = [], validation_gates: validationGates = [],
   architectural_assignments: architecturalAssignments = [],
+  completion: { blockers: completionBlockers = [] } = {},
 } = payload;
 
 {
@@ -228,7 +229,10 @@ const quantityRows = new Map();
 {
   const sheet = sheets.Uyarılar;
   addTitle(sheet, "UYARILAR", "Kesin sonuca girmeyen eksikler ve analiz tanıları", "G");
-  const rows = warnings.map((item) => [item.severity, item.code, item.message, item.source_id, item.element_id, item.id, project.updated_at]);
+  const rows = [
+    ...warnings.map((item) => [item.severity, item.code, item.message, item.source_id, item.element_id, item.id, project.updated_at]),
+    ...completionBlockers.map((item) => ["error", item.code, item.message, item.source_id, "", `completion:${item.code}:${item.source_id}`, project.updated_at]),
+  ];
   addTable(sheet, 4, ["Seviye", "Kod", "Açıklama", "Kaynak ID", "Eleman ID", "Uyarı ID", "Proje Zamanı"], rows, "G");
   [12, 27, 70, 22, 22, 22, 24].forEach(
     (width, index) => sheet.getRangeByIndexes(0, index, Math.max(rows.length + 4, 5), 1).format.columnWidth = width,
@@ -364,8 +368,8 @@ const scenarioAdjustmentRows = new Map();
 
 {
   const sheet = sheets.Özet;
-  addTitle(sheet, "METRAJAI · KESİN METRAJ ÖZETİ", `${project.name} · yalnız onaylı elemanlar`, "F");
-  sheet.getRange("A4:F4").values = [["Disiplin", "Kategori", "Birim", "Kesin Miktar", "Kaynak Satır", "Durum"]];
+  addTitle(sheet, "METRAJAI · METRAJ ÖZETİ", `${project.name} · yalnız onaylı elemanlar`, "F");
+  sheet.getRange("A4:F4").values = [["Disiplin", "Kategori", "Birim", "Onaylı Miktar", "Kaynak Satır", "Kapsam Durumu"]];
   sheet.getRange("A4:F4").format = headers;
   const combos = [...new Map(quantities.map((item) => [`${item.discipline}|${item.category}|${item.unit}`, [item.discipline, item.category, item.unit]])).values()];
   const metrajEnd = Math.max(quantities.length + 4, 5);
@@ -374,7 +378,8 @@ const scenarioAdjustmentRows = new Map();
     sheet.getRange(`A${row}:C${row}`).values = [[...combo]];
     sheet.getRange(`D${row}`).formulas = [[`=SUMIFS('Metraj'!$T$5:$T$${metrajEnd},'Metraj'!$B$5:$B$${metrajEnd},A${row},'Metraj'!$D$5:$D$${metrajEnd},B${row},'Metraj'!$F$5:$F$${metrajEnd},C${row})`]];
     sheet.getRange(`E${row}`).formulas = [[`=COUNTIFS('Metraj'!$B$5:$B$${metrajEnd},A${row},'Metraj'!$D$5:$D$${metrajEnd},B${row},'Metraj'!$F$5:$F$${metrajEnd},C${row})`]];
-    sheet.getRange(`F${row}`).values = [["Mühendis onaylı"]];
+    sheet.getRange(`F${row}`).values = [[combo[0] === "structural" && completionBlockers.length
+      ? "Kısmi · statik kapsam eksik" : "Mühendis onaylı"]];
   });
   const comboEnd = Math.max(combos.length + 4, 5);
   if (combos.length) {

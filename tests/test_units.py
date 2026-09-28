@@ -3,7 +3,28 @@ from __future__ import annotations
 import pytest
 
 from metrajai.contracts import DrawingUnit
-from metrajai.units import UnitConfirmationRequired, resolve_unit, unit_from_insunits, unit_scale
+from metrajai.units import (
+    UnitConfirmationRequired,
+    resolve_unit,
+    suggest_unit_from_area_ratio,
+    unit_from_insunits,
+    unit_scale,
+)
+
+
+@pytest.mark.parametrize(
+    ("selected", "ratio", "expected"),
+    [
+        (DrawingUnit.MM, 100, DrawingUnit.CM),
+        (DrawingUnit.CM, 0.01, DrawingUnit.MM),
+        (DrawingUnit.M, 0.0001, DrawingUnit.CM),
+        (DrawingUnit.CM, 10000, DrawingUnit.M),
+        (DrawingUnit.MM, 87, DrawingUnit.CM),
+        (DrawingUnit.CM, 1.5, None),
+    ],
+)
+def test_written_area_suggests_only_consistent_unit(selected, ratio, expected) -> None:
+    assert suggest_unit_from_area_ratio(selected, ratio) == expected
 
 
 def test_supported_dxf_units_are_converted_to_metres() -> None:

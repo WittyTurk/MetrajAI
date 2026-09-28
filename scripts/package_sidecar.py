@@ -73,6 +73,17 @@ def main() -> None:
             "xlrd",
             "--collect-data",
             "metrajai",
+            # Development/reference-only packages must never enter the desktop
+            # sidecar; they also bring large native modules that may be iCloud
+            # placeholders on a developer Mac.
+            "--exclude-module",
+            "ifcopenshell",
+            "--exclude-module",
+            "mypy",
+            "--exclude-module",
+            "mypyc",
+            "--exclude-module",
+            "numpy._core._operand_flag_tests",
             "--hidden-import",
             "uvicorn.logging",
             "--hidden-import",

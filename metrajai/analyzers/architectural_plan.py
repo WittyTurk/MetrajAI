@@ -20,7 +20,7 @@ from ..contracts import (
     ReviewStatus,
     SourceFile,
 )
-from ..units import unit_scale
+from ..units import suggest_unit_from_area_ratio, unit_scale
 from .architectural_schedule import (
     _normalize,
     extract_architectural_schedules,
@@ -299,6 +299,7 @@ def _merge_collinear_wall_segments(
                     "wall_detection_method": "collinear_closed_boundaries_with_gap",
                     "segment_handles": handles,
                     "opening_gap_width_m": opening_gap,
+                    "plan_region_id": seed.properties.get("plan_region_id", ""),
                 },
                 required_inputs=["length_m", "height_m"],
                 confidence=min(item.confidence for item in members),
@@ -359,11 +360,21 @@ def _finish(
     opening: float = 0.0,
     band_height: float | None = None,
     policy: str,
+    opening_ids: list[str] | None = None,
+    opening_area_basis: float = 0.0,
+    opening_share_ratio: float = 1.0,
+    band_bottom_m: float | None = None,
 ) -> DetectedElement:
     net = max(0.0, gross - opening)
     room_code = str(room.properties.get("room_code", room.id))
     identity = f"{room.id}|{surface}|{material}|{band_height or 0:g}"
     blocking = [issue for issue in room.issues if issue.startswith("blocking:")]
+    if surface == "wall" and room.properties.get("room_area_basis") == "schedule_net_gross_plan":
+        # The matched polygon partitions the gross floor area. Its perimeter is
+        # not a measured inner wall face and cannot establish wall finish area.
+        blocking.append("blocking:net_room_perimeter_required")
+    if band_bottom_m is not None and opening_ids:
+        blocking.append("blocking:opening_vertical_position_required")
     return DetectedElement(
         id=_stable_id(source, "finish", identity),
         source_id=source.id,
@@ -389,6 +400,11 @@ def _finish(
             "band_height_m": band_height,
             "calculation_policy": policy,
             "derived_by": "architectural_v1.1",
+            "plan_region_id": room.properties.get("plan_region_id", ""),
+            "opening_element_ids": opening_ids or [],
+            "opening_area_basis_m2": round(opening_area_basis, 6),
+            "opening_share_ratio": opening_share_ratio,
+            "band_bottom_m": band_bottom_m,
         },
         required_inputs=["area_m2"],
         confidence=room.confidence,
@@ -397,6 +413,45 @@ def _finish(
         ),
         issues=(blocking if net > 0 else [*blocking, "blocking:finish_area_missing"]),
     )
+
+
+def gross_net_area_evidence(
+    elements: list[DetectedElement], source_id: str
+) -> dict[str, float] | None:
+    """Recognize a gross-plan/net-schedule pair without conflating their areas."""
+    rooms = [
+        item
+        for item in elements
+        if item.source_id == source_id
+        and item.element_type == "room"
+        and item.properties.get("schedule_evidence")
+        and not item.properties.get("evidence_only")
+    ]
+    if len(rooms) < 2 or any(
+        not item.properties.get("boundary_element_id")
+        or item.measurements.get("geometric_area_m2", 0) <= 0
+        for item in rooms
+    ):
+        return None
+    gross_reference = float(rooms[0].properties.get("reference_gross_area_m2") or 0)
+    schedule_reference = float(rooms[0].properties.get("room_schedule_total_area_m2") or 0)
+    if gross_reference <= 0 or schedule_reference <= 0:
+        return None
+    gross_plan = sum(item.measurements["geometric_area_m2"] for item in rooms)
+    schedule_net = sum(item.measurements["area_m2"] for item in rooms)
+    if (
+        gross_reference <= schedule_reference * 1.01
+        or abs(gross_plan - gross_reference) > max(0.02, gross_reference * 0.01)
+        or abs(schedule_net - schedule_reference) > 0.02
+    ):
+        return None
+    return {
+        "gross_reference_m2": gross_reference,
+        "gross_plan_m2": round(gross_plan, 6),
+        "schedule_net_m2": round(schedule_net, 6),
+        "independent_net_m2": float(rooms[0].properties.get("reference_net_area_m2") or 0),
+        "room_count": float(len(rooms)),
+    }
 
 
 def reconcile_architectural_elements(
@@ -408,28 +463,94 @@ def reconcile_architectural_elements(
         for item in elements
         if item.source_id == source.id
         and item.element_type == "room"
-        and item.geometry.kind
-        in {"architectural_schedule_row", "spreadsheet_schedule_row", "spreadsheet_row"}
+        and (
+            item.geometry.kind
+            in {"architectural_schedule_row", "spreadsheet_schedule_row", "spreadsheet_row"}
+            or bool(item.properties.get("schedule_evidence"))
+            or bool(item.properties.get("boundary_element_id"))
+        )
     }
     plan_rooms = [
         item
         for item in elements
-        if item.element_type == "room"
+        if item.source_id == source.id
+        and item.element_type == "room"
         and item.geometry.kind
         not in {"architectural_schedule_row", "spreadsheet_schedule_row", "spreadsheet_row"}
+        and not item.properties.get("schedule_evidence")
+        and not item.properties.get("boundary_element_id")
     ]
+    region_codes: dict[str, set[str]] = {}
+    for item in plan_rooms:
+        region = str(item.properties.get("plan_region_id", ""))
+        code = str(item.properties.get("room_code", ""))
+        if region and code in schedule_rooms:
+            region_codes.setdefault(region, set()).add(code)
+    best_region_score = max((len(codes) for codes in region_codes.values()), default=0)
+    best_regions = [
+        region for region, codes in region_codes.items() if len(codes) == best_region_score
+    ]
+    preferred_plan_region = (
+        best_regions[0] if best_region_score >= 2 and len(best_regions) == 1 else ""
+    )
     consumed: set[str] = set()
     room_id_map: dict[str, str] = {}
     warnings: list[AnalysisWarning] = []
     for code, room in schedule_rooms.items():
-        candidates = [item for item in plan_rooms if item.properties.get("room_code") == code]
-        if len(candidates) != 1:
-            room.issues.append("blocking:room_boundary_assignment_required")
+        boundary_candidates = [
+            {
+                "id": item.id,
+                "room_code": str(item.properties.get("room_code", "")),
+                "area_m2": item.measurements.get("area_m2", 0.0),
+                "source_handle": item.source_handle,
+                "plan_region_id": item.properties.get("plan_region_id", ""),
+                "preferred_plan_region": bool(
+                    preferred_plan_region
+                    and item.properties.get("plan_region_id") == preferred_plan_region
+                ),
+            }
+            for item in plan_rooms
+            if item.geometry.kind == "room_boundary" and item.properties.get("boundary_method")
+        ]
+        if boundary_candidates:
+            room.properties["boundary_candidates"] = boundary_candidates
+        if preferred_plan_region:
+            room.properties["preferred_plan_region_id"] = preferred_plan_region
+        manual_target = str(room.properties.get("manual_boundary_target_id", ""))
+        candidates = (
+            [item for item in plan_rooms if item.id == manual_target]
+            if manual_target
+            else [
+                item
+                for item in plan_rooms
+                if item.properties.get("room_code") == code
+                and (
+                    not preferred_plan_region
+                    or item.properties.get("plan_region_id") == preferred_plan_region
+                )
+            ]
+        )
+        existing_boundary_id = str(room.properties.get("boundary_element_id", ""))
+        if existing_boundary_id and (not manual_target or manual_target == existing_boundary_id):
+            room_id_map[existing_boundary_id] = room.id
+            continue
+        if len(candidates) != 1 or candidates[0].id in consumed:
+            if "blocking:room_boundary_assignment_required" not in room.issues:
+                room.issues.append("blocking:room_boundary_assignment_required")
             room.review_status = ReviewStatus.NEEDS_REVIEW
             continue
         boundary = candidates[0]
         consumed.add(boundary.id)
         room_id_map[boundary.id] = room.id
+        room.issues = [
+            issue
+            for issue in room.issues
+            if issue
+            not in {
+                "blocking:room_boundary_assignment_required",
+                "blocking:room_schedule_geometry_mismatch",
+            }
+        ]
         geometric = boundary.measurements.get("area_m2", 0.0)
         scheduled = room.measurements.get("area_m2", 0.0)
         room.geometry = boundary.geometry.model_copy(deep=True)
@@ -437,6 +558,9 @@ def reconcile_architectural_elements(
         room.measurements["geometric_area_m2"] = geometric
         room.properties["boundary_element_id"] = boundary.id
         room.properties["boundary_source_handle"] = boundary.source_handle
+        room.properties["plan_region_id"] = boundary.properties.get("plan_region_id", "")
+        if preferred_plan_region and not manual_target:
+            room.properties["boundary_match_method"] = "unique_room_code_in_primary_plan"
         boundary_blocking = [
             issue
             for issue in boundary.issues
@@ -453,10 +577,75 @@ def reconcile_architectural_elements(
         else:
             room.confidence = min(room.confidence, boundary.confidence)
 
+    gross_net = gross_net_area_evidence(elements, source.id)
+    if gross_net is not None:
+        approved_count = 0
+        for room in schedule_rooms.values():
+            room.properties["gross_net_basis_available"] = True
+            if room.properties.get("manual_area_basis_policy") != "schedule_net_gross_plan":
+                continue
+            room.properties["room_area_basis"] = "schedule_net_gross_plan"
+            room.properties["boundary_area_basis"] = "gross_partition"
+            room.measurements["gross_region_area_m2"] = room.measurements["geometric_area_m2"]
+            room.issues = [
+                issue
+                for issue in room.issues
+                if issue != "blocking:room_schedule_geometry_mismatch"
+            ]
+            if "review:schedule_net_gross_plan_basis" not in room.issues:
+                room.issues.append("review:schedule_net_gross_plan_basis")
+            if room.review_status == ReviewStatus.NEEDS_REVIEW and not any(
+                issue.startswith("blocking:") for issue in room.issues
+            ):
+                room.review_status = ReviewStatus.PENDING
+            approved_count += 1
+        independent_net = gross_net["independent_net_m2"]
+        net_difference = (
+            f" Bağımsız bölüm net kanıtı {independent_net:g} m² ile çizelge "
+            f"arasında {abs(independent_net - gross_net['schedule_net_m2']):.2f} m² "
+            "fark ayrıca korunur."
+            if independent_net > 0
+            else ""
+        )
+        warnings.append(
+            AnalysisWarning(
+                code="ARCHITECTURAL_GROSS_NET_AREA_BASIS",
+                message=(
+                    f"Plan mahal poligonları toplamı {gross_net['gross_plan_m2']:g} m², "
+                    f"bağımsız bölüm brüt kanıtı {gross_net['gross_reference_m2']:g} m²; "
+                    f"mahal çizelgesi net toplamı {gross_net['schedule_net_m2']:g} m². "
+                    f"{net_difference} Çizelge neti "
+                    f"{approved_count}/{len(schedule_rooms)} mahal için "
+                    "gerekçeli kararla esas alındı. Brüt poligon çevresi net duvar "
+                    "kaplamasına uygulanmaz."
+                ),
+                source_id=source.id,
+                severity="info" if approved_count == len(schedule_rooms) else "warning",
+            )
+        )
+
     base = [
         item for item in elements if item.id not in consumed and item.element_type != "finish_area"
     ]
-    openings = [item for item in base if item.element_type in {"door", "window"}]
+    # A plan polygon is evidence for a scheduled room, not a second room quantity.
+    # Keep unmatched polygons visible for assignment, but never make them approvable.
+    schedule_room_ids = {room.id for room in schedule_rooms.values()}
+    for item in base:
+        if (
+            item.source_id == source.id
+            and item.element_type == "room"
+            and item.geometry.kind == "room_boundary"
+            and item.id not in schedule_room_ids
+        ):
+            item.properties["evidence_only"] = True
+            if "blocking:unmatched_room_boundary_evidence_only" not in item.issues:
+                item.issues.append("blocking:unmatched_room_boundary_evidence_only")
+            item.review_status = ReviewStatus.NEEDS_REVIEW
+    openings = [
+        item
+        for item in base
+        if item.element_type in {"door", "window"} and not item.properties.get("evidence_only")
+    ]
     for opening in openings:
         adjacent = [
             room_id_map.get(str(room_id), str(room_id))
@@ -465,28 +654,33 @@ def reconcile_architectural_elements(
         opening.properties["adjacent_room_ids"] = list(dict.fromkeys(adjacent))
     walls = [item for item in base if item.element_type == "wall"]
     for wall in walls:
+        hosted_openings = [
+            opening for opening in openings if opening.properties.get("host_wall_id") == wall.id
+        ]
+        wall.properties["opening_element_ids"] = [opening.id for opening in hosted_openings]
         wall.measurements["opening_area_m2"] = round(
-            sum(
-                opening.measurements.get("opening_area_m2", 0.0)
-                for opening in openings
-                if opening.properties.get("host_wall_id") == wall.id
-            ),
+            sum(opening.measurements.get("opening_area_m2", 0.0) for opening in hosted_openings),
             6,
         )
+        wall.properties["opening_area_basis_m2"] = wall.measurements["opening_area_m2"]
     derived: list[DetectedElement] = []
     for room in [
         item for item in base if item.source_id == source.id and item.element_type == "room"
     ]:
+        if room.properties.get("evidence_only"):
+            continue
         area = room.measurements.get("area_m2", 0.0)
         floor_material = str(room.properties.get("floor_finish", "")).strip()
         ceiling_material = str(room.properties.get("ceiling_finish", "")).strip()
         perimeter = room.measurements.get("perimeter_m", 0.0)
         height = room.measurements.get("height_m", 0.0)
+        related_openings = [
+            item for item in openings if room.id in item.properties.get("adjacent_room_ids", [])
+        ]
         opening_area = sum(
-            item.measurements.get("opening_area_m2", 0.0)
-            for item in openings
-            if room.id in item.properties.get("adjacent_room_ids", [])
+            item.measurements.get("opening_area_m2", 0.0) for item in related_openings
         )
+        opening_ids = [item.id for item in related_openings]
         if floor_material and area > 0:
             derived.append(
                 _finish(source, room, "floor", floor_material, gross=area, policy="net_room_area")
@@ -547,6 +741,8 @@ def reconcile_architectural_elements(
                             opening=opening_area,
                             band_height=height,
                             policy="finish_matrix_full_room_height",
+                            opening_ids=opening_ids,
+                            opening_area_basis=opening_area,
                         )
                     )
 
@@ -569,6 +765,10 @@ def reconcile_architectural_elements(
                     opening=lower_opening,
                     band_height=lower_height,
                     policy="explicit_lower_height_band",
+                    opening_ids=opening_ids,
+                    opening_area_basis=opening_area,
+                    opening_share_ratio=lower_height / height,
+                    band_bottom_m=0.0,
                 )
             )
             upper_height = height - lower_height
@@ -583,6 +783,10 @@ def reconcile_architectural_elements(
                         opening=opening_area - lower_opening,
                         band_height=upper_height,
                         policy="remaining_upper_height_band",
+                        opening_ids=opening_ids,
+                        opening_area_basis=opening_area,
+                        opening_share_ratio=upper_height / height,
+                        band_bottom_m=lower_height,
                     )
                 )
         else:
@@ -596,6 +800,8 @@ def reconcile_architectural_elements(
                     opening=opening_area,
                     band_height=height,
                     policy="single_material_full_room_height",
+                    opening_ids=opening_ids,
+                    opening_area_basis=opening_area,
                 )
             )
     return base + derived, warnings
@@ -615,12 +821,17 @@ def apply_architectural_assignments(
         if subject is None:
             continue
         kind = assignment.kind.value
-        if kind == "room_boundary" and subject.element_type == "room" and len(targets) == 1:
-            boundary = targets[0]
-            subject.properties["room_code"] = subject.properties.get(
-                "room_code", boundary.properties.get("room_code", "")
-            )
-            boundary.properties["room_code"] = subject.properties.get("room_code", "")
+        if (
+            kind == "room_boundary"
+            and subject.element_type == "room"
+            and len(assignment.target_element_ids) == 1
+        ):
+            # The physical candidate may have been consumed by an earlier reconciliation.
+            # Storage validates this id against the room's recorded source candidates.
+            subject.properties["manual_boundary_target_id"] = assignment.target_element_ids[0]
+        elif kind == "room_area_basis" and subject.element_type == "room":
+            subject.properties["manual_area_basis_policy"] = "schedule_net_gross_plan"
+            subject.properties["area_basis_assignment_id"] = assignment.id
         elif (
             kind == "opening_host"
             and subject.element_type in {"door", "window"}
@@ -640,7 +851,9 @@ def apply_architectural_assignments(
             ]
         elif kind == "finish_policy" and subject.element_type == "finish_area":
             subject.properties.update(assignment.values)
-        subject.properties.setdefault("architectural_assignment_ids", []).append(assignment.id)
+        assignment_ids = subject.properties.setdefault("architectural_assignment_ids", [])
+        if assignment.id not in assignment_ids:
+            assignment_ids.append(assignment.id)
     return elements
 
 
@@ -799,7 +1012,11 @@ def extract_architectural_plan(
                     source_handle=identity,
                     geometry=Geometry(kind="room_boundary", points=points, bbox=box),
                     measurements={"area_m2": area, "perimeter_m": perimeter},
-                    properties={"room_code": code, "boundary_method": kind.lower()},
+                    properties={
+                        "room_code": code,
+                        "boundary_method": kind.lower(),
+                        "plan_region_id": item.path.split("/", 1)[0] if "/" in item.path else "",
+                    },
                     required_inputs=["area_m2", "perimeter_m"],
                     confidence=0.9 if code else 0.72,
                     review_status=ReviewStatus.PENDING if code else ReviewStatus.NEEDS_REVIEW,
@@ -833,7 +1050,10 @@ def extract_architectural_plan(
                     source_handle=identity,
                     geometry=Geometry(kind="paired_wall_boundary", points=points, bbox=box),
                     measurements={"length_m": large, "thickness_m": small},
-                    properties={"wall_detection_method": "closed_double_boundary"},
+                    properties={
+                        "wall_detection_method": "closed_double_boundary",
+                        "plan_region_id": item.path.split("/", 1)[0] if "/" in item.path else "",
+                    },
                     required_inputs=["length_m", "height_m"],
                     confidence=0.88,
                     review_status=ReviewStatus.NEEDS_REVIEW,
@@ -860,6 +1080,12 @@ def extract_architectural_plan(
             element_type = "window"
         if not element_type:
             continue
+        # A dimension/annotation nested in a door block is not itself an
+        # installed door. Preserve it as evidence, never as an approvable count.
+        annotation_layer = any(
+            token in _normalize(item.layer)
+            for token in ("OLCU", "DIMENSION", "ANNOTATION", "ACIKLAMA")
+        )
         opening_root_paths.add(item.path)
         width = abs(box[2] - box[0])
         height = abs(box[3] - box[1])
@@ -895,6 +1121,8 @@ def extract_architectural_plan(
             and room.geometry.bbox[1] - 0.5 <= center[1] <= room.geometry.bbox[3] + 0.5
         ][:2]
         issues = []
+        if annotation_layer:
+            issues.append("blocking:annotation_opening_not_physical")
         if host is None:
             issues.append("blocking:opening_host_wall_required")
         if not adjacent:
@@ -909,6 +1137,7 @@ def extract_architectural_plan(
             issues.append("blocking:opening_schedule_match_required")
             issues.append("missing:height_m")
         properties = {
+            "plan_region_id": item.path.split("/", 1)[0] if "/" in item.path else "",
             "opening_type": type_code or item.block_name or element_type,
             "opening_material": schedule_item.get("material", "") if schedule_item else "",
             "opening_schedule_block": schedule_item.get("schedule_block", "")
@@ -917,6 +1146,7 @@ def extract_architectural_plan(
             "host_wall_id": host.id if host else "",
             "adjacent_room_ids": adjacent,
             "opening_context": "interior" if len(adjacent) == 2 else "exterior",
+            "evidence_only": annotation_layer,
         }
         elements.append(
             DetectedElement(
@@ -1000,7 +1230,8 @@ def extract_architectural_plan(
             element.issues.append("blocking:drawing_unit_evidence_mismatch")
             element.review_status = ReviewStatus.NEEDS_REVIEW
         ratio = median(ratios)
-        suggested = "cm" if 80 <= ratio <= 120 else "çizim birimi"
+        candidate = suggest_unit_from_area_ratio(drawing_unit, ratio)
+        suggested = candidate.value if candidate is not None else "çizim birimi"
         warnings.append(
             AnalysisWarning(
                 code="ARCHITECTURAL_UNIT_EVIDENCE_MISMATCH",

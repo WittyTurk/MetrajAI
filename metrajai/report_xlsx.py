@@ -8,6 +8,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
+from .structural_readiness import structural_completion_blockers
 from .workspace import ProjectWorkspace
 
 INK = "172023"
@@ -125,6 +126,7 @@ def export_openpyxl_report(workspace: ProjectWorkspace, target: Path) -> Path:
     item: Any
     sources = workspace.list_sources()
     elements = workspace.list_elements()
+    completion_blockers = structural_completion_blockers(elements)
     quantities = workspace.list_quantities()
     assumptions = workspace.list_assumptions()
     warnings = workspace.list_warnings()
@@ -320,6 +322,8 @@ def export_openpyxl_report(workspace: ProjectWorkspace, target: Path) -> Path:
                     ],
                     ensure_ascii=False,
                 ),
+                measurement.get("gross_region_area_m2"),
+                properties.get("room_area_basis", ""),
             ]
         )
         if gross is not None:
@@ -332,7 +336,7 @@ def export_openpyxl_report(workspace: ProjectWorkspace, target: Path) -> Path:
         "Mahal Adı",
         "Yüzey",
         "Malzeme/Tip",
-        "Brüt Alan",
+        "Hesap Baz Alanı",
         "Açıklık Alanı",
         "Net Alan",
         "Birim",
@@ -343,11 +347,13 @@ def export_openpyxl_report(workspace: ProjectWorkspace, target: Path) -> Path:
         "Onay",
         "Hesap Politikası",
         "İlişki Kararları",
+        "Plan Brüt Poligon Alanı",
+        "Mahal Alan Dayanağı",
     ]
     _title(
         sheets["Mimari Kırılım"],
         "MİMARİ KIRILIM",
-        "Mahal ve malzeme bazında brüt alan − doğrulanmış açıklık = net alan",
+        "Net çizelge ve brüt plan alanları ayrı; kaplamada baz alan − doğrulanmış açıklık",
         len(architectural_headers),
     )
     _table(sheets["Mimari Kırılım"], architectural_headers, architectural_values)
@@ -460,6 +466,17 @@ def export_openpyxl_report(workspace: ProjectWorkspace, target: Path) -> Path:
         [
             [item.severity, item.code, item.message, item.source_id, item.element_id, item.id]
             for item in warnings
+        ]
+        + [
+            [
+                "error",
+                item.code,
+                item.message,
+                item.source_id,
+                "",
+                f"completion:{item.code}:{item.source_id}",
+            ]
+            for item in completion_blockers
         ],
     )
 
@@ -675,8 +692,25 @@ def export_openpyxl_report(workspace: ProjectWorkspace, target: Path) -> Path:
     totals: dict[tuple[str, str, str], list[int]] = {}
     for row, item in enumerate(quantities, start=5):
         totals.setdefault((item.discipline.value, item.category, item.unit), []).append(row)
-    summary_headers = ["Disiplin", "Kategori", "Birim", "Kesin Miktar", "Kaynak Satır", "Durum"]
-    summary_values = [[*key, None, len(rows), "Mühendis onaylı"] for key, rows in totals.items()]
+    summary_headers = [
+        "Disiplin",
+        "Kategori",
+        "Birim",
+        "Onaylı Miktar",
+        "Kaynak Satır",
+        "Kapsam Durumu",
+    ]
+    summary_values = [
+        [
+            *key,
+            None,
+            len(rows),
+            "Kısmi · statik kapsam eksik"
+            if key[0] == "structural" and completion_blockers
+            else "Mühendis onaylı",
+        ]
+        for key, rows in totals.items()
+    ]
     _title(
         sheets["Özet"],
         "METRAJAI · KESİN METRAJ ÖZETİ",

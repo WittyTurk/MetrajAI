@@ -53,6 +53,7 @@ import type {
   ReviewStatus,
   SheetKind,
   SourceFile,
+  SourceDrawingPreview,
   SourceInspection,
   ValidationGate,
 } from "./types";
@@ -79,7 +80,7 @@ const FLOOR_KINDS: { value: FloorKind; label: string }[] = [
 
 const SHEET_KINDS: { value: SheetKind; label: string }[] = [
   { value: "unspecified", label: "Seçilmedi" },
-  { value: "plan", label: "Uygulama / kalıp planı" },
+  { value: "plan", label: "Kat planı" },
   { value: "column_application", label: "Kolon aplikasyonu" },
   { value: "rebar_plan", label: "Donatı planı" },
   { value: "foundation", label: "Temel planı" },
@@ -105,6 +106,13 @@ const STATUS_LABELS: Record<ReviewStatus, string> = {
   rejected: "Hariç tutuldu",
 };
 
+function reviewStatusLabel(element: DetectedElement) {
+  if (element.review_status !== "needs_review") return STATUS_LABELS[element.review_status];
+  const missing = element.required_inputs.some((key) => !(element.measurements[key] > 0));
+  const blocked = element.issues.some((issue) => issue.startsWith("blocking:"));
+  return missing || blocked ? "Eksik bilgi" : "Mühendis kontrolü";
+}
+
 const MEASUREMENT_LABELS: Record<string, string> = {
   width_m: "Genişlik (m)",
   depth_m: "Derinlik (m)",
@@ -125,6 +133,7 @@ const MEASUREMENT_LABELS: Record<string, string> = {
   side_formwork_m2: "Yan kalıp alanı (m²)",
   riser_formwork_m2: "Rıht kalıp alanı (m²)",
   landing_formwork_m2: "Sahanlık alt kalıbı (m²)",
+  sill_height_m: "Açıklık alt kotu (bitmiş döşemeden m)",
 };
 
 function App() {
@@ -251,12 +260,15 @@ function App() {
     );
   }
 
-  const pendingCount =
-    (project.review_counts.pending ?? 0) + (project.review_counts.needs_review ?? 0);
+  const reviewableCount = elements.filter((item) => item.properties.evidence_only !== true).length;
+  const pendingCount = elements.filter((item) =>
+    item.properties.evidence_only !== true && ["pending", "needs_review"].includes(item.review_status)
+  ).length;
+  const structuralBlockers = structuralCompletionMessages(elements);
   const analysisActive = run != null && ["queued", "running"].includes(run.status);
   const setupIssueCount = sources.filter(sourceNeedsSetup).length;
-  const reviewComplete = elements.length > 0 && pendingCount === 0;
-  const quantitiesComplete = quantities.length > 0 && pendingCount === 0;
+  const reviewComplete = reviewableCount > 0 && pendingCount === 0;
+  const quantitiesComplete = quantities.length > 0 && pendingCount === 0 && structuralBlockers.length === 0;
   const advancedActive = ["floors", "mapping", "revisions"].includes(view);
   function continueToReview() {
     if (setupIssueCount > 0) {
@@ -276,7 +288,7 @@ function App() {
         <div className="project-chip">
           <span>Aktif proje</span>
           <strong>{project.project.name}</strong>
-          <small>{sources.length} kaynak · {elements.length} eleman</small>
+          <small>{sources.length} kaynak · {reviewableCount} metraj adayı{elements.length > reviewableCount ? ` · ${elements.length - reviewableCount} çizim izi` : ""}</small>
           <button
             className="project-switch"
             disabled={analysisActive}
@@ -293,7 +305,7 @@ function App() {
         <nav className="workflow-nav" aria-label="Proje adımları">
           <StageNavItem index="1" label="Dosyaları ekle" status={sources.length === 0 ? "Dosya bekleniyor" : setupIssueCount ? `${setupIssueCount} dosyada ayar gerekli` : `${sources.length} dosya hazır`} active={view === "sources"} complete={sources.length > 0 && setupIssueCount === 0} onClick={() => setView("sources")} />
           <StageNavItem index="2" label="Ölçüleri kontrol et" status={elements.length === 0 ? "Analiz yapılmadı" : pendingCount ? `${pendingCount} karar bekliyor` : "Kararlar tamamlandı"} active={view === "review"} complete={reviewComplete} onClick={() => setView("review")} />
-          <StageNavItem index="3" label="Sonuçları al" status={quantities.length === 0 ? "Henüz sonuç yok" : pendingCount ? "Kısmi sonuç" : `${quantities.length} kesin satır`} active={view === "quantities"} complete={quantitiesComplete} onClick={() => setView("quantities")} />
+          <StageNavItem index="3" label="Sonuçları al" status={quantities.length === 0 ? "Henüz sonuç yok" : !quantitiesComplete ? "Kısmi sonuç" : `${quantities.length} kesin satır`} active={view === "quantities"} complete={quantitiesComplete} onClick={() => setView("quantities")} />
         </nav>
         <div className="sidebar-tools">
           <span className="sidebar-section-label">İSTEĞE BAĞLI</span>
@@ -339,8 +351,8 @@ function App() {
         {view === "sources" && <SourcesView api={api} project={project} sources={sources} setupIssueCount={setupIssueCount} onChanged={() => void refresh()} onNext={continueToReview} onError={setMessage} />}
         {view === "floors" && <FloorsView api={api} projectId={project.project.project_id} sources={sources} elements={elements} floors={floors} repeatAssignments={repeatAssignments} onChanged={() => void refresh()} onError={setMessage} onNext={() => setView("mapping")} />}
         {view === "mapping" && <MappingView api={api} projectId={project.project.project_id} sources={sources} onChanged={() => void refresh()} onError={setMessage} onNext={() => void startAnalysis()} />}
-        {view === "review" && <ReviewView api={api} projectId={project.project.project_id} elements={elements} assignments={architecturalAssignments} warnings={warnings} hasSources={sources.length > 0} analysisActive={analysisActive} onSources={() => setView("sources")} onAnalyze={continueToReview} onChanged={() => void refresh()} onError={setMessage} onNext={() => setView("quantities")} />}
-        {view === "quantities" && <QuantitiesView api={api} projectId={project.project.project_id} quantities={quantities} pendingCount={pendingCount} onReview={() => setView("review")} onCommercial={() => setView("commercial")} onMessage={setMessage} />}
+        {view === "review" && <ReviewView api={api} projectId={project.project.project_id} sources={sources} elements={elements} assignments={architecturalAssignments} warnings={warnings} hasSources={sources.length > 0} analysisActive={analysisActive} onSources={() => setView("sources")} onMapping={() => setView("mapping")} onAnalyze={continueToReview} onReanalyze={() => void startAnalysis()} onChanged={() => void refresh()} onError={setMessage} onNext={() => setView("quantities")} />}
+        {view === "quantities" && <QuantitiesView api={api} projectId={project.project.project_id} quantities={quantities} pendingCount={pendingCount} structuralBlockers={structuralBlockers} onReview={() => setView("review")} onCommercial={() => setView("commercial")} onMessage={setMessage} />}
         {view === "commercial" && <CommercialView api={api} projectId={project.project.project_id} quantities={quantities} catalogs={priceCatalogs} priceItems={priceItems} mappings={priceMappings} scenarios={offerScenarios} gates={validationGates} onChanged={() => void refresh()} onError={setMessage} />}
         {view === "revisions" && <RevisionComparisonView api={api} projectId={project.project.project_id} sources={sources} />}
       </main>
@@ -615,7 +627,7 @@ function ToolNavItem({ icon, label, active, onClick }: { icon: React.ReactNode; 
 function SourcesView({ api, project, sources, setupIssueCount, onChanged, onNext, onError }: { api: EngineApi; project: ProjectSummary; sources: SourceFile[]; setupIssueCount: number; onChanged: () => void; onNext: () => void; onError: (message: string) => void }) {
   const [path, setPath] = useState("");
   const [discipline, setDiscipline] = useState<Discipline | "">("");
-  const [role, setRole] = useState("kalip");
+  const [role, setRole] = useState("");
   const [floor, setFloor] = useState("GENEL");
   const [floorKind, setFloorKind] = useState<FloorKind>("general");
   const [sheetKind, setSheetKind] = useState<SheetKind>("unspecified");
@@ -635,7 +647,11 @@ function SourcesView({ api, project, sources, setupIssueCount, onChanged, onNext
     setInspection(null);
     setInspectionError("");
     setDiscipline("");
+    setRole("");
+    setFloor("GENEL");
+    setFloorKind("general");
     setSheetKind("unspecified");
+    setRevision("");
     setUnit("unknown");
     setInspecting(false);
   }
@@ -647,7 +663,16 @@ function SourcesView({ api, project, sources, setupIssueCount, onChanged, onNext
     setInspectionError("");
     try {
       const result = await api.inspectSource(value.trim());
-      if (requestId === inspectionRequest.current) setInspection(result);
+      if (requestId === inspectionRequest.current) {
+        setInspection(result);
+        if (result.suggested_discipline) setDiscipline(result.suggested_discipline);
+        if (result.suggested_sheet_kind) setSheetKind(result.suggested_sheet_kind);
+        if (result.suggested_discipline) setRole(defaultSourceRole(result.suggested_discipline, result.suggested_sheet_kind ?? "unspecified"));
+        if (result.suggested_floor && result.suggested_floor_kind) {
+          setFloor(result.suggested_floor);
+          setFloorKind(result.suggested_floor_kind);
+        }
+      }
     } catch (error) {
       if (requestId === inspectionRequest.current) setInspectionError((error as Error).message);
     } finally {
@@ -741,20 +766,20 @@ function SourcesView({ api, project, sources, setupIssueCount, onChanged, onNext
         <label>DXF, Excel veya PDF<div className="path-picker"><input value={path} onChange={(event) => changePath(event.target.value)} placeholder="Dosya seçin veya yolu yazın" /><button onClick={() => void chooseFile()}><FolderOpen size={17} /></button></div></label>
         {path && !inspection && <button className="button secondary source-inspect-button" disabled={inspecting} onClick={() => void inspectPath(path)}>{inspecting ? <LoaderCircle className="spin" size={16} /> : <Focus size={16} />}{inspecting ? "Dosya inceleniyor…" : "Dosyayı ön kontrol et"}</button>}
         {inspectionError && <div className="inline-error" role="alert">Ön kontrol başarısız: {inspectionError}</div>}
-        {inspection && <div className={`source-inspection ${inspection.unit_conflict ? "warning" : ""}`}><strong>Dosya ön kontrolü</strong>{inspection.source_format === "dxf" && <span>DXF başlığı: {inspection.header_unit === "unknown" ? "birim yok" : inspection.header_unit}{inspection.suggested_unit !== "unknown" && inspection.suggested_unit !== inspection.header_unit ? ` · Alan kanıtı: ${inspection.suggested_unit} öneriyor` : ""}</span>}{inspection.source_format !== "dxf" && <span>{inspection.source_format.toUpperCase()} dosyası; çizim birimi uygulanmaz.</span>}{inspection.discipline_evidence.length > 0 && <small>Pafta ipuçları: {inspection.discipline_evidence.slice(0, 3).join(" · ")}</small>}{inspection.suggested_discipline && <button className="button secondary" onClick={() => chooseDiscipline(inspection.suggested_discipline as Discipline)}>{discipline === inspection.suggested_discipline ? "Önerilen alan seçildi" : `${disciplineLabel(inspection.suggested_discipline)} olarak seç`}</button>}{inspection.unit_conflict && <p>Başlık ve yazılı alanlar çelişiyor. Bilinen bir çizim ölçüsüyle karşılaştırıp kullanılacak birimi açıkça seçin.</p>}</div>}
+        {inspection && <div className={`source-inspection ${inspection.unit_conflict || inspection.requires_unit_confirmation ? "warning" : ""}`}><strong>Dosya ön kontrolü</strong>{inspection.source_format === "dxf" && <span>DXF başlığı: {inspection.header_unit === "unknown" ? "birim yok" : inspection.header_unit}{inspection.suggested_unit !== "unknown" && inspection.suggested_unit !== inspection.header_unit ? ` · Çizim kanıtı: ${inspection.suggested_unit} öneriyor` : ""}</span>}{inspection.source_format !== "dxf" && <span>{inspection.source_format.toUpperCase()} dosyası; çizim birimi uygulanmaz.</span>}{inspection.unit_evidence.slice(1).map((evidence, index) => <small key={index}>{evidence}</small>)}{inspection.suggested_discipline && <small>Önerilen alan: {disciplineLabel(inspection.suggested_discipline)} · {inspection.discipline_evidence.slice(0, 3).join(" / ")}</small>}{inspection.suggested_sheet_kind && <small>Önerilen pafta: {sheetKindLabel(inspection.suggested_sheet_kind, discipline || undefined)} · {inspection.sheet_evidence.slice(0, 3).join(" / ")}</small>}{inspection.suggested_floor && <small>Önerilen kat: {inspection.suggested_floor}</small>}{inspection.unit_conflict && <p>DXF başlığı çizim kanıtıyla çelişiyor. Birimi doğrulayın; özgün DXF değişmez.</p>}{inspection.requires_unit_confirmation && !inspection.unit_conflict && inspection.suggested_unit === "unknown" && <p>Birim kanıtı yeterli değil. Bilinen bir ölçüyle kontrol edip birimi seçin.</p>}</div>}
         {inspection?.suggested_discipline === "architectural" && discipline === "structural" && <div className="inline-error" role="alert">Bu paftanın başlıkları mimariyi gösteriyor. Statik kolon/kiriş araması için ayrı statik pafta ekleyin.</div>}
-        <div className="form-row"><label>Proje alanı<select value={discipline} onChange={(event) => chooseDiscipline(event.target.value as Discipline)}><option value="">Seçiniz</option>{DISCIPLINES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><label>Bu dosyada ne var?<select value={sheetKind} onChange={(event) => { const next = event.target.value as SheetKind; setSheetKind(next); if (discipline) setRole(defaultSourceRole(discipline, next)); }}>{SHEET_KINDS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label></div>
-        {inspection?.requires_unit_confirmation && <label className="source-unit-choice">Kullanılacak çizim birimi<select value={unit} onChange={(event) => setUnit(event.target.value as DrawingUnit)}><option value="unknown">Ölçüye bakıp seçiniz</option><option value="mm">Milimetre (mm)</option><option value="cm">Santimetre (cm)</option><option value="m">Metre (m)</option></select><small>Öneri otomatik onaylanmaz; seçiminiz hesaplara kaydedilir.</small></label>}
+        <div className="form-row"><label>Proje alanı<select value={discipline} onChange={(event) => chooseDiscipline(event.target.value as Discipline)}><option value="">Seçiniz</option>{DISCIPLINES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><label>Bu dosyada ne var?<select value={sheetKind} onChange={(event) => { const next = event.target.value as SheetKind; setSheetKind(next); if (discipline) setRole(defaultSourceRole(discipline, next)); }}>{SHEET_KINDS.map((item) => <option key={item.value} value={item.value}>{sheetKindLabel(item.value, discipline || undefined)}</option>)}</select></label></div>
+        {inspection?.requires_unit_confirmation && <label className="source-unit-choice">Kullanılacak çizim birimi{inspection.suggested_unit !== "unknown" && inspection.unit_conflict && <button type="button" className="button secondary unit-suggestion" onClick={() => setUnit(inspection.suggested_unit)}>Önerilen {inspection.suggested_unit} birimini kullan</button>}<select value={unit} onChange={(event) => setUnit(event.target.value as DrawingUnit)}><option value="unknown">Ölçüye bakıp seçiniz</option><option value="mm">Milimetre (mm)</option><option value="cm">Santimetre (cm)</option><option value="m">Metre (m)</option></select><small>Bu seçim tüm dosyaya bir kez uygulanır ve hesaplara kaydedilir. Yazılı ölçülerle tutarsız mahaller ayrıca incelemeye kalır.</small></label>}
         <div className="form-row"><label>Kat adı<input value={floor} onChange={(event) => setFloor(event.target.value)} placeholder="Örn. Zemin Kat" /></label><label>Kat türü<select value={floorKind} onChange={(event) => setFloorKind(event.target.value as FloorKind)}>{FLOOR_KINDS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label></div>
         <details className="source-extra"><summary>Diğer dosya bilgileri <span>İsteğe bağlı</span></summary><div className="form-row three"><label>Pafta rolü<input value={role} onChange={(event) => setRole(event.target.value)} placeholder="kalıp / detay / mahal" /></label><label>Revizyon<input value={revision} onChange={(event) => setRevision(event.target.value)} placeholder="R00" /></label>{inspection?.source_format === "dxf" && !inspection.requires_unit_confirmation && <label>Çizim birimi<select value={unit} onChange={(event) => setUnit(event.target.value as DrawingUnit)}><option value="unknown">DXF'ten oku</option><option value="mm">mm</option><option value="cm">cm</option><option value="m">m</option></select></label>}</div><small>Çizim birimi çelişirse analizden önce onayınız istenir.</small></details>
         <small className="field-help">Tekrar eden katları gerekirse Gelişmiş araçlar bölümünde ayrıca tanımlayabilirsiniz.</small>
-        <button className="button primary wide" disabled={!path || !inspection || !discipline || (inspection.suggested_discipline === "architectural" && discipline === "structural") || (inspection.source_format === "dxf" && sheetKind === "unspecified") || (inspection.requires_unit_confirmation && unit === "unknown") || busy} onClick={() => void addSource()}>{busy ? <LoaderCircle className="spin" size={17} /> : <FilePlus2 size={17} />}Dosyayı ekle</button>
+        <button className="button primary wide" disabled={!path || !inspection || !discipline || !role.trim() || !floor.trim() || (inspection.suggested_discipline === "architectural" && discipline === "structural") || (inspection.source_format === "dxf" && sheetKind === "unspecified") || (inspection.requires_unit_confirmation && unit === "unknown") || busy} onClick={() => void addSource()}>{busy ? <LoaderCircle className="spin" size={17} /> : <FilePlus2 size={17} />}Dosyayı ekle</button>
         <p className="hint">Dosya SHA-256 kimliğiyle proje klasörüne kopyalanır; özgün dosya değiştirilmez.</p>
       </section>
       <section className="panel source-list-panel">
         <div className="section-heading"><div><span className="eyebrow">PROJE KAYNAKLARI</span><h2>{sources.length} dosya hazır</h2></div><span className="count-badge">{sources.length}</span></div>
         <div className="source-list">
-          {sources.length === 0 ? <EmptyState icon={<Boxes />} title="Henüz kaynak yok" detail="İlk DXF paftasını veya referans çizelgesini ekleyin." /> : sources.map((source) => <div className="source-row" key={source.id}><div className={`file-icon ${source.discipline}`}>{source.original_name.split(".").pop()?.toUpperCase()}</div><div className="source-main"><strong>{source.original_name}</strong><span>{disciplineLabel(source.discipline)} · {sheetKindLabel(source.sheet_kind)} · {floorKindLabel(source.floor_kind)} / {source.floor}</span><small>SHA {source.sha256.slice(0, 12)}</small></div><div className="source-actions"><select className="source-discipline" aria-label={`${source.original_name} disiplini`} value={source.discipline} disabled={updatingId === source.id} onChange={(event) => void changeDiscipline(source, event.target.value as Discipline)}>{DISCIPLINES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select><div className={`unit-pill ${sourceStatusReady(source) ? "confirmed" : ""}`}>{sourceStatusLabel(source)}</div><button className="source-delete" aria-label={`${source.original_name} kaynağını sil`} title="Kaynağı sil" disabled={deletingId === source.id} onClick={() => void removeSource(source)}>{deletingId === source.id ? <LoaderCircle className="spin" size={16} /> : <Trash2 size={16} />}</button></div></div>)}
+          {sources.length === 0 ? <EmptyState icon={<Boxes />} title="Henüz kaynak yok" detail="İlk DXF paftasını veya referans çizelgesini ekleyin." /> : sources.map((source) => <div className="source-row" key={source.id}><div className={`file-icon ${source.discipline}`}>{source.original_name.split(".").pop()?.toUpperCase()}</div><div className="source-main"><strong>{source.original_name}</strong><span>{disciplineLabel(source.discipline)} · {sheetKindLabel(source.sheet_kind, source.discipline)} · {floorKindLabel(source.floor_kind)} / {source.floor}</span><small>SHA {source.sha256.slice(0, 12)}</small></div><div className="source-actions"><select className="source-discipline" aria-label={`${source.original_name} disiplini`} value={source.discipline} disabled={updatingId === source.id} onChange={(event) => void changeDiscipline(source, event.target.value as Discipline)}>{DISCIPLINES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select><div className={`unit-pill ${sourceStatusReady(source) ? "confirmed" : ""}`}>{sourceStatusLabel(source)}</div><button className="source-delete" aria-label={`${source.original_name} kaynağını sil`} title="Kaynağı sil" disabled={deletingId === source.id} onClick={() => void removeSource(source)}>{deletingId === source.id ? <LoaderCircle className="spin" size={16} /> : <Trash2 size={16} />}</button></div></div>)}
         </div>
         {setupIssueCount > 0 && <div className="source-setup-note"><AlertTriangle size={17} /><span>{setupIssueCount} dosyada birim, ölçek veya pafta görevi doğrulaması gerekiyor. Ölçü çıkarmadan önce bunları kontrol edeceğiz.</span></div>}
         <button className="button secondary next-button" disabled={sources.length === 0} onClick={onNext}>{setupIssueCount ? "Eksik ayarları kontrol et" : "Ölçüleri bul"} <ChevronRight size={16} /></button>
@@ -833,6 +858,25 @@ function FloorsView({ api, projectId, sources, elements, floors, repeatAssignmen
   </div>;
 }
 
+function UnitEvidenceCheck({ api, projectId, source }: { api: EngineApi; projectId: string; source: SourceFile }) {
+  const [result, setResult] = useState<SourceInspection | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function inspect() {
+    setBusy(true);
+    setError("");
+    try {
+      setResult(await api.inspectProjectSource(projectId, source.id));
+    } catch (failure) {
+      setError((failure as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  const independentEvidence = result && ["structural_sections", "architectural_area"].includes(result.unit_evidence_basis);
+  return <div className="unit-evidence-check"><button type="button" className="unit-evidence-trigger" disabled={busy} onClick={() => void inspect()}>{busy ? "Ölçüler inceleniyor…" : "Birim kanıtını incele"}</button>{error && <small role="alert">{error}</small>}{result && <div className="unit-evidence-result"><strong>{independentEvidence && result.suggested_unit === source.drawing_unit ? `Seçilen ${source.drawing_unit} çizim kanıtıyla uyumlu` : independentEvidence ? `Yazılı ölçü/alan ${result.suggested_unit} öneriyor` : "Bağımsız birim kanıtı yetersiz"}</strong>{result.unit_evidence.map((evidence, index) => <small key={index}>{evidence}</small>)}{independentEvidence && result.suggested_unit !== source.drawing_unit && <small>Öneriyi uygulamak için yanındaki “Kullanılacak birim” alanından seçip analizi yeniden çalıştırın. Çelişen elemanlar kesin hesaba alınmaz.</small>}</div>}</div>;
+}
+
 function MappingView({ api, projectId, sources, onChanged, onError, onNext }: { api: EngineApi; projectId: string; sources: SourceFile[]; onChanged: () => void; onError: (message: string) => void; onNext: () => void }) {
   const dxfSources = sources.filter((source) => source.source_format === "dxf");
   const pdfSources = sources.filter((source) => source.source_format === "pdf");
@@ -840,13 +884,15 @@ function MappingView({ api, projectId, sources, onChanged, onError, onNext }: { 
   const unresolvedSheets = dxfSources.filter((source) => source.discipline === "structural" && source.sheet_kind === "unspecified");
   const unresolvedPdf = pdfSources.filter((source) => source.calibration_status !== "confirmed");
   const unresolvedCount = unresolvedUnits.length + unresolvedSheets.length + unresolvedPdf.length;
+  const conflictingUnits = dxfSources.filter((source) => source.unit_confirmed && source.detected_unit !== "unknown" && source.drawing_unit !== source.detected_unit);
   return <div className="stack">
-    <section className="callout"><Gauge size={22} /><div><strong>Pafta ve birim güvenlik kapısı</strong><p>DXF birimi ve pafta görevi açıkça eşlenir. Detay/kesit paftaları fiziksel eleman adedine girmez.</p></div><span className={unresolvedCount ? "risk" : "safe"}>{unresolvedCount ? `${unresolvedCount} karar gerekli` : "Hazır"}</span></section>
+    <section className="callout"><Gauge size={22} /><div><strong>Pafta ve birim güvenlik kapısı</strong><p>DXF birimi ve pafta görevi açıkça eşlenir. Detay/kesit paftaları fiziksel eleman adedine girmez.</p></div><span className={unresolvedCount || conflictingUnits.length ? "risk" : "safe"}>{unresolvedCount ? `${unresolvedCount} karar gerekli` : conflictingUnits.length ? `${conflictingUnits.length} birim çelişkisi` : "Hazır"}</span></section>
+    {conflictingUnits.length > 0 && <section className="callout warning"><AlertTriangle size={22} /><div><strong>DXF başlığı ile seçilen birim farklı</strong><p>{conflictingUnits.map((source) => `${source.original_name}: başlık ${source.detected_unit}, kullanılan ${source.drawing_unit}`).join(" · ")}. Kaynak ölçüsüyle kontrol etmeden kesin metrajı onaylamayın; özgün çizim değiştirilmedi.</p></div></section>}
     <section className="panel">
       <div className="section-heading"><div><span className="eyebrow">KAT VE PAFTA YÖNETİMİ</span><h2>Her dosyanın tek ve açık görevi</h2></div></div>
       <div className="sheet-mapping-list">{sources.map((source) => <SourceMappingEditor key={source.id} api={api} projectId={projectId} source={source} onChanged={onChanged} />)}</div>
     </section>
-    {dxfSources.length > 0 && <section className="panel"><div className="section-heading"><div><span className="eyebrow">BİRİM DOĞRULAMA</span><h2>DXF kaynakları metre standardına dönüştürülür</h2></div></div><div className="mapping-table"><div className="mapping-head"><span>Kaynak</span><span>DXF algısı</span><span>Kullanılacak birim</span><span>Durum</span></div>{dxfSources.map((source) => <div className="mapping-row" key={source.id}><div><strong>{source.original_name}</strong><small>{source.floor} · {source.role}</small></div><code>{source.detected_unit}</code><select value={source.unit_confirmed ? source.drawing_unit : source.detected_unit} onChange={async (event) => { const selected = event.target.value as DrawingUnit; if (selected !== "unknown") { try { await api.confirmUnit(projectId, source.id, selected); onChanged(); } catch (error) { onError((error as Error).message); } } }}><option value="unknown">Seçiniz</option><option value="mm">Milimetre</option><option value="cm">Santimetre</option><option value="m">Metre</option></select><span className={`status-dot-label ${source.unit_confirmed || source.detected_unit !== "unknown" ? "ok" : "warn"}`}><i />{source.unit_confirmed ? "Onaylandı" : source.detected_unit !== "unknown" ? "DXF değeri" : "Bekliyor"}</span></div>)}</div></section>}
+    {dxfSources.length > 0 && <section className="panel"><div className="section-heading"><div><span className="eyebrow">BİRİM DOĞRULAMA</span><h2>DXF kaynakları metre standardına dönüştürülür</h2></div></div><div className="mapping-table"><div className="mapping-head"><span>Kaynak</span><span>DXF algısı</span><span>Kullanılacak birim</span><span>Durum</span></div>{dxfSources.map((source) => { const conflict = source.unit_confirmed && source.detected_unit !== "unknown" && source.drawing_unit !== source.detected_unit; return <div className="mapping-row" key={source.id}><div><strong>{source.original_name}</strong><small>{source.floor} · {source.role}</small><UnitEvidenceCheck api={api} projectId={projectId} source={source} /></div><code>{source.detected_unit}</code><select value={source.unit_confirmed ? source.drawing_unit : source.detected_unit} onChange={async (event) => { const selected = event.target.value as DrawingUnit; if (selected !== "unknown") { try { await api.confirmUnit(projectId, source.id, selected); onChanged(); } catch (error) { onError((error as Error).message); } } }}><option value="unknown">Seçiniz</option><option value="mm">Milimetre</option><option value="cm">Santimetre</option><option value="m">Metre</option></select><span className={`status-dot-label ${conflict || (!source.unit_confirmed && source.detected_unit === "unknown") ? "warn" : "ok"}`}><i />{conflict ? "Çelişki · kontrol et" : source.unit_confirmed ? "Onaylandı" : source.detected_unit !== "unknown" ? "DXF değeri" : "Bekliyor"}</span></div>; })}</div></section>}
     {pdfSources.length > 0 && <section className="panel"><div className="section-heading"><div><span className="eyebrow">PDF KALİBRASYONU</span><h2>İki noktalı ölçek doğrulaması</h2></div></div><div className="sheet-mapping-list">{pdfSources.map((source) => <PdfCalibrationEditor key={source.id} api={api} projectId={projectId} source={source} onChanged={onChanged} />)}</div></section>}
     <div className="footer-action"><p>Yalnız onaylı eleman/şablon tekrarları uygulanır; çizelge ve detaylar körlemesine çoğaltılmaz.</p><button className="button primary" disabled={unresolvedCount > 0} onClick={onNext}><Play size={16} fill="currentColor" /> Tespitleri oluştur</button></div>
   </div>;
@@ -879,6 +925,7 @@ function SourceMappingEditor({ api, projectId, source, onChanged }: { api: Engin
   const [revision, setRevision] = useState(source.revision);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const suspiciousArchitecturalRole = source.discipline === "architectural" && /kalıp|kalip/i.test(role);
 
   useEffect(() => {
     setRole(source.role);
@@ -911,9 +958,11 @@ function SourceMappingEditor({ api, projectId, source, onChanged }: { api: Engin
   }
 
   return <div className="sheet-mapping-card">
-    <div className="sheet-mapping-title"><div><strong>{source.original_name}</strong><small>{disciplineLabel(source.discipline)} · SHA {source.sha256.slice(0, 10)}</small></div><span className={`sheet-kind-pill ${sheetKind}`}>{sheetKindLabel(sheetKind)}</span></div>
+    <div className="sheet-mapping-title"><div><strong>{source.original_name}</strong><small>{disciplineLabel(source.discipline)} · SHA {source.sha256.slice(0, 10)}</small></div><span className={`sheet-kind-pill ${sheetKind}`}>{sheetKindLabel(sheetKind, source.discipline)}</span></div>
+    {suspiciousArchitecturalRole && <div className="mapping-advice"><AlertTriangle size={15} /><span>Disiplin “Mimari”, pafta rolü “kalıp” görünüyor. Bu dosya mimariyse rolü “Mimari uygulama planı” olarak düzeltin; statikse disiplinini kaynaklar ekranından değiştirin.</span><button className="button secondary" onClick={() => setRole("Mimari uygulama planı")}>Rolü öner</button></div>}
+    {source.discipline === "architectural" && floor === "GENEL" && <div className="mapping-advice"><Layers3 size={15} /><span>Dosya düzeyindeki kat “GENEL”. Tek DXF’de plan, kesit ve çizelge birlikteyse bölge kanıtları analizde ayrı değerlendirilir; tamamını zorla Zemin Kat saymayın.</span></div>}
     <div className="sheet-mapping-grid">
-      <label>Pafta türü<select value={sheetKind} onChange={(event) => setSheetKind(event.target.value as SheetKind)}>{SHEET_KINDS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
+      <label>Pafta türü<select value={sheetKind} onChange={(event) => setSheetKind(event.target.value as SheetKind)}>{SHEET_KINDS.map((item) => <option key={item.value} value={item.value}>{sheetKindLabel(item.value, source.discipline)}</option>)}</select></label>
       <label>Kat türü<select value={floorKind} onChange={(event) => setFloorKind(event.target.value as FloorKind)}>{FLOOR_KINDS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
       <label>Kat adı<input value={floor} onChange={(event) => setFloor(event.target.value)} /></label>
       <label>Pafta rolü<input value={role} onChange={(event) => setRole(event.target.value)} /></label>
@@ -933,22 +982,29 @@ interface RebarRevisionCandidate {
   scope_labels: string[];
 }
 
-function ReviewView({ api, projectId, elements, assignments, warnings, hasSources, analysisActive, onSources, onAnalyze, onChanged, onError, onNext }: { api: EngineApi; projectId: string; elements: DetectedElement[]; assignments: ArchitecturalAssignment[]; warnings: AnalysisWarning[]; hasSources: boolean; analysisActive: boolean; onSources: () => void; onAnalyze: () => void; onChanged: () => void; onError: (message: string) => void; onNext: () => void }) {
-  const [filter, setFilter] = useState<ReviewStatus | "all">("all");
+function ReviewView({ api, projectId, sources, elements, assignments, warnings, hasSources, analysisActive, onSources, onMapping, onAnalyze, onReanalyze, onChanged, onError, onNext }: { api: EngineApi; projectId: string; sources: SourceFile[]; elements: DetectedElement[]; assignments: ArchitecturalAssignment[]; warnings: AnalysisWarning[]; hasSources: boolean; analysisActive: boolean; onSources: () => void; onMapping: () => void; onAnalyze: () => void; onReanalyze: () => void; onChanged: () => void; onError: (message: string) => void; onNext: () => void }) {
+  const [disciplineScope, setDisciplineScope] = useState<"all" | "architectural" | "structural">("all");
+  const [filter, setFilter] = useState<ReviewStatus | "all" | "evidence">("all");
   const [typeFilter, setTypeFilter] = useState<string>("all");
   const [floorFilter, setFloorFilter] = useState<string>("all");
   const [architectureTab, setArchitectureTab] = useState<"all" | "rooms" | "walls" | "openings" | "finishes">("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [bulkReason, setBulkReason] = useState("");
+  const [reviewSearch, setReviewSearch] = useState("");
+  const [visibleCardCount, setVisibleCardCount] = useState(30);
   const [busy, setBusy] = useState(false);
   const [resultMessage, setResultMessage] = useState("");
-  const elementTypes = Array.from(new Set(elements.map((item) => item.element_type)));
-  const floors = Array.from(new Set(elements.map((item) => item.floor))).sort((a, b) => a.localeCompare(b, "tr"));
-  const floorElements = floorFilter === "all" ? elements : elements.filter((item) => item.floor === floorFilter);
-  const filtered = elements.filter((item) =>
-    (filter === "all" || item.review_status === filter)
+  const scopedElements = disciplineScope === "all" ? elements : elements.filter((item) => item.discipline === disciplineScope);
+  const scopedSourceIds = new Set(sources.filter((source) => disciplineScope === "all" || source.discipline === disciplineScope).map((source) => source.id));
+  const scopedWarnings = disciplineScope === "all" ? warnings : warnings.filter((item) => scopedSourceIds.has(item.source_id));
+  const elementTypes = Array.from(new Set(scopedElements.map((item) => item.element_type)));
+  const floors = Array.from(new Set(scopedElements.map((item) => item.floor))).sort((a, b) => a.localeCompare(b, "tr"));
+  const floorElements = floorFilter === "all" ? scopedElements : scopedElements.filter((item) => item.floor === floorFilter);
+  const filtered = scopedElements.filter((item) =>
+    (filter === "evidence" ? item.properties.evidence_only === true : item.properties.evidence_only !== true && (filter === "all" || item.review_status === filter))
     && (typeFilter === "all" || item.element_type === typeFilter)
     && (floorFilter === "all" || item.floor === floorFilter)
+    && (!reviewSearch.trim() || [item.source_handle, item.layer, item.floor, String(item.properties.room_code ?? ""), String(item.properties.element_label ?? "")].join(" ").toLocaleLowerCase("tr-TR").includes(reviewSearch.trim().toLocaleLowerCase("tr-TR")))
     && (architectureTab === "all"
       || (architectureTab === "rooms" && item.element_type === "room")
       || (architectureTab === "walls" && item.element_type === "wall")
@@ -956,33 +1012,80 @@ function ReviewView({ api, projectId, elements, assignments, warnings, hasSource
       || (architectureTab === "finishes" && item.element_type === "finish_area"))
   );
   const selected = filtered.find((item) => item.id === selectedId) ?? filtered[0];
-  const pending = floorElements.filter((item) => ["pending", "needs_review"].includes(item.review_status)).length;
+  const evidenceCount = floorElements.filter((item) => item.properties.evidence_only === true).length;
+  const pending = floorElements.filter((item) => item.properties.evidence_only !== true && ["pending", "needs_review"].includes(item.review_status)).length;
+  const readyForReview = floorElements.filter((item) => item.properties.evidence_only !== true && ["pending", "needs_review"].includes(item.review_status) && !item.issues.some((issue) => issue.startsWith("blocking:")) && item.required_inputs.every((key) => (item.measurements[key] ?? 0) > 0)).length;
+  const unitBlocked = floorElements.filter((item) => item.issues.includes("blocking:drawing_unit_evidence_mismatch")).length;
+  const unitWarning = scopedWarnings.find((item) => item.code === "ARCHITECTURAL_UNIT_EVIDENCE_MISMATCH" && sources.some((source) => source.id === item.source_id) && ["mm", "cm", "m"].includes(String(item.evidence?.suggested_unit)));
+  const suggestedUnit = unitWarning?.evidence.suggested_unit as DrawingUnit | undefined;
+  const roomAreaMismatch = floorElements.filter((item) => item.element_type === "room" && item.issues.includes("blocking:room_schedule_geometry_mismatch"));
+  const grossNetCandidates = sources.filter((source) => source.discipline === "architectural").flatMap((source) => {
+    const rooms = scopedElements.filter((item) => item.source_id === source.id && item.element_type === "room" && item.properties.schedule_evidence && item.properties.evidence_only !== true);
+    const grossReference = Number(rooms[0]?.properties.reference_gross_area_m2 ?? 0);
+    const scheduleReference = Number(rooms[0]?.properties.room_schedule_total_area_m2 ?? 0);
+    const grossPlan = rooms.reduce((sum, item) => sum + Number(item.measurements.geometric_area_m2 ?? 0), 0);
+    const scheduleNet = rooms.reduce((sum, item) => sum + Number(item.measurements.area_m2 ?? 0), 0);
+    const waiting = rooms.filter((item) => item.issues.includes("blocking:room_schedule_geometry_mismatch"));
+    if (rooms.length < 2 || waiting.length === 0 || grossReference <= scheduleReference * 1.01
+      || rooms.some((item) => !item.properties.boundary_element_id)
+      || Math.abs(grossPlan - grossReference) > Math.max(0.02, grossReference * 0.01)
+      || Math.abs(scheduleNet - scheduleReference) > 0.02) return [];
+    return [{ source, rooms: waiting, grossReference, grossPlan, scheduleNet,
+      independentNet: Number(rooms[0]?.properties.reference_net_area_m2 ?? 0) }];
+  });
+  const roomBoundaryBlocked = floorElements.filter((item) => item.element_type === "room" && item.properties.evidence_only !== true && item.issues.includes("blocking:room_boundary_assignment_required"));
+  const openingRelationBlocked = floorElements.filter((item) => ["door", "window"].includes(item.element_type) && item.issues.some((issue) => ["blocking:opening_host_wall_required", "blocking:opening_room_assignment_required", "blocking:opening_schedule_match_required"].includes(issue))).length;
+  const dependentAreaBlocked = floorElements.filter((item) => item.issues.includes("blocking:opening_decision_required")).length;
+  const orderedWarnings = [...scopedWarnings].sort((a, b) => ({ error: 0, warning: 1, info: 2 })[a.severity] - ({ error: 0, warning: 1, info: 2 })[b.severity]);
   const bulkEligible = filtered.filter((item) =>
-    ["pending", "needs_review"].includes(item.review_status)
+    item.properties.evidence_only !== true && ["pending", "needs_review"].includes(item.review_status)
     && item.required_inputs.every((key) => Number.isFinite(item.measurements[key]) && item.measurements[key] > 0)
     && !item.issues.some((issue) => issue.startsWith("blocking:"))
     && !item.issues.includes("previous_acceptance_changed_after_reanalysis")
   );
-  const scopeElements = floorElements.filter((item) =>
-    item.review_status !== "rejected" && (typeFilter === "all" || item.element_type === typeFilter)
+  const quantityScopeElements = floorElements.filter((item) =>
+    item.properties.evidence_only !== true && item.review_status !== "rejected" && (typeFilter === "all" || item.element_type === typeFilter)
   );
-  const previewTotals = quantityPreviewTotals(scopeElements);
+  const previewTotals = quantityPreviewTotals(quantityScopeElements);
   const approvedTotals = quantityPreviewTotals(
-    scopeElements.filter((item) => item.review_status === "accepted"),
+    quantityScopeElements.filter((item) => item.review_status === "accepted"),
   );
-  const rebarElement = elements.find((item) =>
+  const rebarElement = scopedElements.find((item) =>
     item.element_type === "rebar" && Array.isArray(item.properties.revision_candidates)
   );
   const revisionCandidates = (rebarElement?.properties.revision_candidates ?? []) as RebarRevisionCandidate[];
-  const selectedRevisionHandle = elements.find((item) =>
+  const selectedRevisionHandle = scopedElements.find((item) =>
     item.element_type === "rebar" && item.properties.revision_selected === true
   )?.properties.table_handle as string | undefined;
+  const reviewedElements = floorElements.filter((item) => item.properties.evidence_only !== true);
+  const foundByType = [...new Set(reviewedElements.map((item) => item.element_type))].map((type) => ({
+    type,
+    count: reviewedElements.filter((item) => item.element_type === type).length,
+    needsAction: reviewedElements.filter((item) => item.element_type === type && ["pending", "needs_review"].includes(item.review_status)).length,
+  }));
+  const structuralBlockers = structuralCompletionMessages(elements);
+  const structuralSamples = ["raft", "shear_wall", "column", "slab", "beam", "rebar"].flatMap((type) => {
+    const candidates = reviewedElements.filter((item) => item.element_type === type)
+      .sort((a, b) => String(a.properties.element_label ?? a.source_handle).localeCompare(String(b.properties.element_label ?? b.source_handle), "tr"));
+    return candidates.length ? [candidates[Math.floor((candidates.length - 1) / 2)]] : [];
+  });
+
+  function chooseDisciplineScope(next: "all" | "architectural" | "structural") {
+    setDisciplineScope(next);
+    setTypeFilter("all");
+    setFloorFilter("all");
+    setFilter("all");
+    setArchitectureTab("all");
+    setReviewSearch("");
+    setSelectedId(null);
+  }
 
   useEffect(() => {
     if (filtered[0] && !filtered.some((item) => item.id === selectedId)) {
       setSelectedId(filtered[0].id);
     }
   }, [filtered, selectedId]);
+  useEffect(() => { setVisibleCardCount(30); }, [floorFilter, typeFilter, filter, architectureTab, reviewSearch]);
 
   async function bulkAccept() {
     if (typeFilter === "all" || bulkEligible.length === 0 || bulkReason.trim().length < 3) return;
@@ -1000,6 +1103,51 @@ function ReviewView({ api, projectId, elements, assignments, warnings, hasSource
       setResultMessage(`${result.reviewed_element_ids.length} eleman onaylandı${skippedCount ? `, ${skippedCount} güvenlik nedeniyle atlandı` : ""}.`);
       onChanged();
     } catch (error) {
+      onError((error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function applyUnitSuggestion() {
+    if (!unitWarning || !suggestedUnit || analysisActive) return;
+    const source = sources.find((item) => item.id === unitWarning.source_id);
+    if (!source) return;
+    if (!window.confirm(`${source.original_name} için ${suggestedUnit} birimini kullanıp analizi yeniden çalıştıralım mı? Eski tespitler yedeklenir; özgün DXF değişmez.`)) return;
+    setBusy(true);
+    try {
+      await api.confirmUnit(projectId, source.id, suggestedUnit);
+      setResultMessage(`${suggestedUnit} birimi kaydedildi; analiz yeniden başlatılıyor.`);
+      onChanged();
+      onReanalyze();
+    } catch (error) {
+      onError((error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function approveScheduleNetBasis(candidate: (typeof grossNetCandidates)[number]) {
+    const reason = `Mahal çizelgesi net ${formatQuantity(candidate.scheduleNet)} m²; eşlenen plan poligonları ${formatQuantity(candidate.grossPlan)} m² ve bağımsız bölüm brüt kanıtı ${formatQuantity(candidate.grossReference)} m² ile uzlaşıyor. Net alan kaynağı çizelge olarak seçildi.`;
+    if (!window.confirm(`${candidate.rooms.length} mahalde çizelge alanı net, plan poligonları brüt kanıtı olarak kaydedilsin mi? Duvar kaplaması için net çevre ölçüsü ayrıca gerekecek.`)) return;
+    setBusy(true);
+    try {
+      for (const room of candidate.rooms) {
+        await api.createArchitecturalAssignment(projectId, {
+          source_id: candidate.source.id,
+          subject_element_id: room.id,
+          kind: "room_area_basis",
+          target_element_ids: [],
+          values: { net_area_source: "schedule", plan_area_role: "gross" },
+          approved: true,
+          reviewer: "Mühendis",
+          reason,
+        });
+      }
+      setResultMessage(`${candidate.rooms.length} mahal için çizelge-net alan dayanağı kaydedildi. Bağımsız bölüm net alan farkı raporda kalır; donatı ve radye kilitleri değişmez.`);
+      onChanged();
+    } catch (error) {
+      onChanged();
       onError((error as Error).message);
     } finally {
       setBusy(false);
@@ -1028,36 +1176,61 @@ function ReviewView({ api, projectId, elements, assignments, warnings, hasSource
 
   if (elements.length === 0) return <div className="stack"><section className="panel review-empty-panel"><div className="review-empty-icon"><Ruler size={26} /></div><span className="eyebrow">2. ADIM · ÖLÇÜLERİ KONTROL ET</span><h2>{analysisActive ? "Çizimler inceleniyor" : "Henüz incelenecek ölçü yok"}</h2><p>{analysisActive ? "Dosyalar işlenirken bu ekrandan ayrılabilirsiniz. Tespitler hazır olunca burada görünecek." : "Dosyaları ekleyip ölçüleri bulun. Bulunan elemanlar mühendis onayı olmadan kesin metraja girmez."}</p><button className="button primary" disabled={analysisActive} onClick={hasSources ? onAnalyze : onSources}>{analysisActive ? <LoaderCircle className="spin" size={16} /> : hasSources ? <Play size={16} fill="currentColor" /> : <FilePlus2 size={16} />}{analysisActive ? "Analiz sürüyor" : hasSources ? "Ölçüleri bul" : "Dosyaları ekle"}</button></section>{warnings.length > 0 && <section className="panel review-empty-warnings"><strong>Analiz uyarıları</strong>{warnings.map((warning) => <p key={warning.id}>{warning.message}</p>)}</section>}</div>;
 
-  return <div className="review-layout">
+  return <>
+    <div className="discipline-switch" role="group" aria-label="İncelenecek proje alanı">
+      {([ ["all", "Tümü"], ["architectural", "Mimari"], ["structural", "Statik"] ] as const).map(([value, label]) => {
+        const count = elements.filter((item) => (value === "all" || item.discipline === value) && item.properties.evidence_only !== true).length;
+        const sourceCount = sources.filter((source) => value === "all" || source.discipline === value).length;
+        return <button key={value} type="button" className={disciplineScope === value ? "active" : ""} aria-pressed={disciplineScope === value} onClick={() => chooseDisciplineScope(value)}><strong>{label}</strong><span>{count} eleman · {sourceCount} dosya</span></button>;
+      })}
+    </div>
+    <div className="review-layout">
     <section className="panel preview-panel">
-      <div className="section-heading compact"><div><span className="eyebrow">DXF ÖNİZLEME</span><h2>Kaynak geometrisi</h2></div><span className="count-badge">{floorElements.length}</span></div>
-      <GeometryPreview elements={floorElements} selectedId={selected?.id} relatedIds={architecturalRelatedIds(selected)} onSelect={setSelectedId} />
+      <div className="section-heading compact"><div><span className="eyebrow">DXF ÖNİZLEME · {disciplineScope === "all" ? "TÜMÜ" : disciplineLabel(disciplineScope)}</span><h2>Kaynak çizimi + tespitler</h2></div><span className="count-badge">{floorElements.length}</span></div>
+      <GeometryPreview api={api} projectId={projectId} elements={scopedElements} selectedId={selected?.id} relatedIds={architecturalRelatedIds(selected)} onSelect={(id) => { if (scopedElements.find((item) => item.id === id)?.properties.evidence_only === true) { setFilter("evidence"); setFloorFilter("all"); setTypeFilter("all"); setArchitectureTab("all"); } setSelectedId(id); }} />
       <div className="legend"><span><i className="accepted" />Onaylı</span><span><i className="pending" />Bekliyor</span><span><i className="needs" />Eksik</span><span><i className="rejected" />Hariç</span></div>
-      {warnings.length > 0 && <div className="warning-stack">{warnings.map((warning) => <div key={warning.id} className={`mini-warning ${warning.severity}`}><AlertTriangle size={15} /><span>{warning.message}</span></div>)}</div>}
+      {scopedWarnings.length > 0 && <div className="warning-stack">{orderedWarnings.slice(0, 4).map((warning) => <div key={warning.id} className={`mini-warning ${warning.severity}`}><AlertTriangle size={15} /><span>{warning.message}</span></div>)}{orderedWarnings.length > 4 && <details className="more-warnings"><summary>Diğer {orderedWarnings.length - 4} uyarıyı göster</summary>{orderedWarnings.slice(4).map((warning) => <div key={warning.id} className={`mini-warning ${warning.severity}`}><AlertTriangle size={15} /><span>{warning.message}</span></div>)}</details>}</div>}
     </section>
     <section className="panel review-panel">
       <div className="review-toolbar">
-        <div><span className="eyebrow">MÜHENDİS ONAYI</span><h2>{pending} karar bekliyor</h2></div>
+        <div><span className="eyebrow">{disciplineScope === "all" ? "TÜM ALANLAR" : disciplineLabel(disciplineScope).toLocaleUpperCase("tr-TR")} · MÜHENDİS ONAYI</span><h2>Bulunan ölçüleri kontrol edin</h2><small>{pending} eleman incelemede · {readyForReview} ölçüsü tamam · {evidenceCount} yalnız kanıt izi</small></div>
         <div className="review-filters">
           <select value={floorFilter} onChange={(event) => { setFloorFilter(event.target.value); setFilter("all"); }}><option value="all">Tüm katlar</option>{floors.map((floor) => <option value={floor} key={floor}>{floor}</option>)}</select>
           <select value={typeFilter} onChange={(event) => { setTypeFilter(event.target.value); setFilter("all"); }}><option value="all">Tüm türler</option>{elementTypes.map((type) => <option value={type} key={type}>{elementTypeLabel(type)}</option>)}</select>
-          <select value={filter} onChange={(event) => setFilter(event.target.value as ReviewStatus | "all")}><option value="all">Tüm durumlar</option><option value="needs_review">Eksik bilgi</option><option value="pending">Onay bekliyor</option><option value="accepted">Onaylı</option><option value="rejected">Hariç</option></select>
+          <select value={filter} onChange={(event) => setFilter(event.target.value as ReviewStatus | "all" | "evidence")}><option value="all">Tüm durumlar</option><option value="needs_review">Eksik bilgi</option><option value="pending">Onay bekliyor</option><option value="accepted">Onaylı</option><option value="rejected">Hariç</option><option value="evidence">Yalnız kanıt izleri</option></select>
         </div>
       </div>
-      {elements.some((item) => item.discipline === "architectural") && <div className="architecture-tabs">{([
+      <div className="review-findings" aria-label="Analizde bulunan elemanlar"><div className="review-findings-title"><strong>Neler bulundu?</strong><small>{reviewedElements.length} metraj adayı · {evidenceCount} yalnız kaynak kanıtı; onaylananlar kesin hesaba girer</small></div><div className="review-findings-grid">{foundByType.map(({ type, count, needsAction }) => <button key={type} type="button" className={typeFilter === type ? "active" : ""} onClick={() => { setTypeFilter(typeFilter === type ? "all" : type); setArchitectureTab("all"); setFilter("all"); }}><strong>{count}</strong><span>{elementTypeLabel(type)}</span><small>{needsAction ? `${needsAction} kontrol bekliyor` : "Kontrol tamam"}</small></button>)}</div></div>
+      {disciplineScope === "architectural" && grossNetCandidates.map((candidate) => <div className="gross-net-basis" key={candidate.source.id}><div><strong>Net alan ile brüt plan sınırını ayırın</strong><small>{candidate.rooms.length} mahal · çizelge neti {formatQuantity(candidate.scheduleNet)} m² · plan poligonları {formatQuantity(candidate.grossPlan)} m² · bağımsız bölüm brütü {formatQuantity(candidate.grossReference)} m²</small><small>{candidate.independentNet > 0 ? `Bağımsız bölüm neti ${formatQuantity(candidate.independentNet)} m² ile ${formatQuantity(Math.abs(candidate.independentNet - candidate.scheduleNet))} m² fark raporda korunur. ` : ""}Bu karar duvar kaplaması için net çevre üretmez.</small></div><button className="button secondary" disabled={busy} onClick={() => void approveScheduleNetBasis(candidate)}>Çizelge netini esas al</button></div>)}
+      {disciplineScope === "structural" && <div className="structural-audit" aria-label="Statik pafta kontrolü">
+        <div className="structural-audit-heading"><div><strong>Pafta ile örnek kontrol</strong><small>Her türden bir temsilci adayı açıp kaynak çizimde etiket, handle ve ölçüsünü karşılaştırın. Örnek kontrolü diğer elemanları otomatik onaylamaz.</small></div><span className={structuralBlockers.length ? "audit-locked" : "audit-ready"}>{structuralBlockers.length ? "Tam toplam kilitli" : "Kapsam engeli yok"}</span></div>
+        {structuralBlockers.length > 0 && <div className="structural-audit-blockers">{structuralBlockers.map((message) => <small key={message}><AlertTriangle size={14} /> {message}</small>)}</div>}
+        <div className="structural-audit-samples">{structuralSamples.map((sample) => <button key={sample.id} type="button" onClick={() => { setFloorFilter("all"); setFilter("all"); setTypeFilter(sample.element_type); setSelectedId(sample.id); }}><span>{elementTypeLabel(sample.element_type)} · {String(sample.properties.element_label || sample.source_handle || "etiket yok")}</span><strong>{measurementSummary(sample)}</strong><small>Kaynak handle: {sample.source_handle || "yok"} · çizimde göster →</small></button>)}</div>
+      </div>}
+      <div className="review-search"><input type="search" value={reviewSearch} onChange={(event) => setReviewSearch(event.target.value)} placeholder="Mahal kodu, eleman etiketi, katman veya handle ara" aria-label="Tespitlerde ara" /><span>{filtered.length} sonuç</span></div>
+      {disciplineScope === "architectural" && <div className="architecture-tabs">{([
         ["all", "Tümü"], ["rooms", "Mahaller"], ["walls", "Duvarlar"],
         ["openings", "Kapı / Pencere"], ["finishes", "Kaplamalar"],
       ] as const).map(([value, label]) => <button key={value} className={architectureTab === value ? "active" : ""} onClick={() => { setArchitectureTab(value); setTypeFilter("all"); }}>{label}</button>)}</div>}
+      {(unitBlocked > 0 || roomBoundaryBlocked.length > 0 || roomAreaMismatch.length > 0 || openingRelationBlocked > 0 || dependentAreaBlocked > 0) && <div className="review-triage" aria-label="Önce çözülecek ortak sorunlar">
+        <strong>Önce ortak sorunları çözün</strong>
+        {unitBlocked > 0 && <div><span><b>{unitBlocked} eleman · Dosya birimi</b><small>Tek bir kaynak birimi kararı bu elemanların hepsini etkiler.</small></span>{unitWarning && suggestedUnit ? <button className="button secondary" disabled={busy || analysisActive} onClick={() => void applyUnitSuggestion()}>Önerilen {suggestedUnit} ile yeniden analiz et</button> : <button className="button secondary" onClick={onMapping}>Birimleri kontrol et</button>}</div>}
+        {roomBoundaryBlocked.length > 0 && <div><span><b>{roomBoundaryBlocked.length} mahal · Plan sınırı eşleşmedi</b><small>Asıl plan bölgesi önerilir; kopya ve detay çizimleri varsayılan listede gizlenir. Seçim alan uyumsuzluğunu tek başına düzeltmez.</small></span><button className="button secondary" onClick={() => { setFloorFilter("all"); setArchitectureTab("rooms"); setTypeFilter("all"); setFilter("needs_review"); setSelectedId(roomBoundaryBlocked[0].id); }}>Önerilen sınırları gör</button></div>}
+        {roomAreaMismatch.length > 0 && <div><span><b>{roomAreaMismatch.length} mahal · Çizelge/çizim alanı farklı</b><small>{grossNetCandidates.length ? "Plan poligonları brüt toplamla eşleşiyor; çizelge net alan kararı yukarıda verilebilir." : "Alanlar aşağıda ayrı gösterilir; yanlış sınır veya eşleşme düzeltilmelidir."}</small></span><button className="button secondary" onClick={() => { setFloorFilter("all"); setArchitectureTab("rooms"); setTypeFilter("all"); setFilter("needs_review"); setSelectedId(roomAreaMismatch[0].id); }}>Mahalleri gör</button></div>}
+        {openingRelationBlocked > 0 && <div><span><b>{openingRelationBlocked} açıklık · İlişki/çizelge kanıtı eksik</b><small>Kapı ve pencerelerin duvar, mahal veya tip eşleşmesini kontrol edin.</small></span><button className="button secondary" onClick={() => { setFloorFilter("all"); setArchitectureTab("openings"); setTypeFilter("all"); setFilter("needs_review"); }}>Açıklıkları gör</button></div>}
+        {dependentAreaBlocked > 0 && <div><span><b>{dependentAreaBlocked} duvar/kaplama · Açıklık kararı bekliyor</b><small>Kapı veya pencere onaylanmadan/reddedilmeden bağlı net alan kesinleşmez.</small></span><button className="button secondary" onClick={() => { setFloorFilter("all"); setArchitectureTab("openings"); setTypeFilter("all"); setFilter("all"); }}>Kapı/pencereleri incele</button></div>}
+      </div>}
       {revisionCandidates.length > 1 && (typeFilter === "all" || typeFilter === "rebar") && <div className="revision-picker"><div><strong>Donatı revizyonunu seçin</strong><small>Seçim yapılmadan donatı kesin toplama giremez.</small></div>{revisionCandidates.map((candidate) => <button key={candidate.table_handle} className={selectedRevisionHandle === candidate.table_handle ? "selected" : ""} disabled={busy} onClick={() => void chooseRevision(candidate)}><span>Revizyon {candidate.label}</span><strong>{formatQuantity(candidate.declared_total_kg)} kg</strong><small>{candidate.row_count} poz · formül {formatQuantity(candidate.calculated_total_kg)} kg</small></button>)}</div>}
       <div className="review-subtotals">{previewTotals.map((total) => { const approved = approvedTotals.find((item) => item.key === total.key)?.value ?? 0; return <div key={total.key}><span>{total.category}</span><strong>{formatQuantity(approved)} <small>{total.unit}</small></strong><small>Aday: {formatQuantity(total.value)} {total.unit}</small></div>; })}{previewTotals.length === 0 && <div><span>Ara toplam</span><strong>—</strong><small>Hesaplanabilir eleman yok</small></div>}</div>
-      {typeFilter !== "all" && <div className="comparison-wrap"><div className="comparison-head"><strong>{elementTypeLabel(typeFilter)} karşılaştırması</strong><span>{filtered.length} satır</span></div><div className="comparison-table"><div className="comparison-row head"><span>Eleman</span><span>Ölçüler</span><span>Hesap adayı</span><span>Durum</span></div>{filtered.map((element) => <button className={`comparison-row ${selected?.id === element.id ? "selected" : ""}`} key={element.id} onClick={() => setSelectedId(element.id)}><span><strong>{String(element.properties.element_label || elementTypeLabel(element.element_type))}</strong><small>{element.source_handle}</small></span><span>{measurementSummary(element)}</span><span>{quantitySummary(element)}</span><span className={`table-status ${element.review_status}`}>{STATUS_LABELS[element.review_status]}</span></button>)}</div></div>}
-      <div className="element-strip">{filtered.map((element) => <button key={element.id} className={selected?.id === element.id ? "selected" : ""} onClick={() => setSelectedId(element.id)}><span className={`status-pin ${element.review_status}`} /><strong>{elementTypeLabel(element.element_type)}{element.properties.element_label ? ` · ${String(element.properties.element_label)}` : ""}</strong><small>{element.floor} · {element.layer}</small></button>)}</div>
+      {typeFilter !== "all" && <div className="comparison-wrap"><div className="comparison-head"><strong>{elementTypeLabel(typeFilter)} karşılaştırması</strong><span>{filtered.length} satır</span></div><div className="comparison-table"><div className="comparison-row head"><span>Eleman</span><span>Ölçüler</span><span>Hesap adayı</span><span>Durum</span></div>{filtered.map((element) => <button className={`comparison-row ${selected?.id === element.id ? "selected" : ""}`} key={element.id} onClick={() => setSelectedId(element.id)}><span><strong>{String(element.properties.element_label || elementTypeLabel(element.element_type))}</strong><small>{element.source_handle}</small></span><span>{measurementSummary(element)}</span><span>{quantitySummary(element)}</span><span className={`table-status ${element.review_status}`}>{reviewStatusLabel(element)}</span></button>)}</div></div>}
+      <div className="element-strip">{filtered.slice(0, visibleCardCount).map((element) => <button key={element.id} className={selected?.id === element.id ? "selected" : ""} onClick={() => setSelectedId(element.id)}><span className={`status-pin ${element.review_status}`} /><strong>{elementTypeLabel(element.element_type)}{element.properties.element_label ? ` · ${String(element.properties.element_label)}` : ""}</strong><small>{element.floor} · {element.layer}</small></button>)}</div>
+      {filtered.length > visibleCardCount && <button className="button secondary more-elements" onClick={() => setVisibleCardCount((count) => count + 30)}>{Math.min(30, filtered.length - visibleCardCount)} eleman daha göster</button>}
       {typeFilter !== "all" && <div className="bulk-review"><div><strong>Güvenli toplu onay</strong><small>{bulkEligible.length} görünür eleman uygun; eksik/engelli satırlar dahil edilmez.</small></div><input value={bulkReason} onChange={(event) => setBulkReason(event.target.value)} placeholder="Pafta ve kontrol gerekçesi…" /><button className="button primary" disabled={busy || bulkEligible.length === 0 || bulkReason.trim().length < 3} onClick={() => void bulkAccept()}><Check size={16} /> {bulkEligible.length} elemanı onayla</button></div>}
       {resultMessage && <div className="inline-result"><Check size={15} />{resultMessage}</div>}
-      {selected ? <ElementReview api={api} projectId={projectId} element={selected} allElements={elements} assignments={assignments} onChanged={onChanged} onError={onError} /> : <EmptyState icon={<Ruler />} title="Bu filtrede tespit yok" detail="Tür veya durum filtresini değiştirin." />}
-      <div className="review-footer"><span>{elements.filter((item) => item.review_status === "accepted").length} onaylı eleman kesin metraja girecek.</span><button className="button secondary" onClick={onNext}>Kesin metrajı gör <ChevronRight size={16} /></button></div>
+      {selected ? <ElementReview api={api} projectId={projectId} element={selected} allElements={elements} assignments={assignments} onChanged={onChanged} onReanalyze={onReanalyze} onError={onError} /> : <EmptyState icon={<Ruler />} title="Bu filtrede tespit yok" detail="Tür veya durum filtresini değiştirin." />}
+      <div className="review-footer"><span>{scopedElements.filter((item) => item.review_status === "accepted").length} onaylı eleman kesin metraja girecek.</span><button className="button secondary" onClick={onNext}>Kesin metrajı gör <ChevronRight size={16} /></button></div>
     </section>
-  </div>;
+  </div></>;
 }
 
 function quantityPreview(element: DetectedElement) {
@@ -1101,19 +1274,36 @@ function measurementSummary(element: DetectedElement) {
   return Object.entries(m).slice(0, 3).map(([key, value]) => `${measurementLabel(element.element_type, key)} ${formatQuantity(value)}`).join(" · ");
 }
 
+function structuralCompletionMessages(elements: DetectedElement[]) {
+  const structural = elements.filter((item) => item.discipline === "structural" && item.properties.evidence_only !== true);
+  if (!structural.length) return [];
+  const messages: string[] = [];
+  const unresolvedUnits = structural.filter((item) => item.issues.includes("blocking:drawing_unit_evidence_mismatch"));
+  if (unresolvedUnits.length) messages.push(`${unresolvedUnits.length} statik elemanda çizim birimi kanıtı çelişiyor.`);
+  const incompleteRafts = structural.filter((item) => item.element_type === "raft" && item.review_status !== "rejected" && !(item.measurements.thickness_m > 0));
+  if (incompleteRafts.length) messages.push(`${incompleteRafts.length} radye temelde kalınlık kanıtı eksik.`);
+  const rebars = structural.filter((item) => item.element_type === "rebar");
+  if (!rebars.length) messages.push("Donatı detayı veya çizelgesi bulunmadı.");
+  else if (rebars.some((item) => Array.isArray(item.properties.revision_candidates) && item.properties.revision_candidates.length > 1)
+    && !rebars.some((item) => item.properties.revision_selected === true)) messages.push("Güncel donatı revizyonu seçilmedi.");
+  return messages;
+}
+
 function quantitySummary(element: DetectedElement) {
   const lines = quantityPreview(element);
   return lines.length ? lines.map((line) => `${line.category}: ${formatQuantity(line.value)} ${line.unit}`).join(" · ") : "Hesap dışında";
 }
 
-function ElementReview({ api, projectId, element, allElements, assignments, onChanged, onError }: { api: EngineApi; projectId: string; element: DetectedElement; allElements: DetectedElement[]; assignments: ArchitecturalAssignment[]; onChanged: () => void; onError: (message: string) => void }) {
-  const keys = element.required_inputs;
+function ElementReview({ api, projectId, element, allElements, assignments, onChanged, onReanalyze, onError }: { api: EngineApi; projectId: string; element: DetectedElement; allElements: DetectedElement[]; assignments: ArchitecturalAssignment[]; onChanged: () => void; onReanalyze: () => void; onError: (message: string) => void }) {
+  const needsSill = ["door", "window"].includes(element.element_type) && allElements.some((item) => item.element_type === "finish_area" && item.properties.band_bottom_m !== null && item.properties.band_bottom_m !== undefined && Array.isArray(item.properties.opening_element_ids) && item.properties.opening_element_ids.includes(element.id));
+  const keys = needsSill ? [...new Set([...element.required_inputs, "sill_height_m"])] : element.required_inputs;
   const [values, setValues] = useState<Record<string, string>>({});
   const [reason, setReason] = useState("");
   const [relationReason, setRelationReason] = useState("");
   const [hostWallId, setHostWallId] = useState("");
   const [roomIds, setRoomIds] = useState<string[]>([]);
   const [boundaryId, setBoundaryId] = useState("");
+  const [showAlternativeRegions, setShowAlternativeRegions] = useState(false);
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     setValues(Object.fromEntries(keys.map((key) => [key, element.measurements[key]?.toString() ?? ""])));
@@ -1122,11 +1312,13 @@ function ElementReview({ api, projectId, element, allElements, assignments, onCh
     setHostWallId(String(element.properties.host_wall_id ?? ""));
     setRoomIds((element.properties.adjacent_room_ids as string[] | undefined) ?? []);
     setBoundaryId(String(element.properties.boundary_element_id ?? ""));
+    setShowAlternativeRegions(false);
   }, [element]);
   async function decide(status: ReviewStatus) {
     setBusy(true);
     try {
       const overrides = Object.fromEntries(Object.entries(values).filter(([key, value]) => value !== "" && Number(value) !== element.measurements[key]).map(([key, value]) => [key, Number(value)]));
+      if (Object.keys(overrides).length > 0 && reason.trim().length < 3) throw new Error("Elle girilen ölçü için kontrol edilen pafta ve gerekçeyi yazın.");
       const reviewReason = element.issues.includes("previous_acceptance_changed_after_reanalysis") && status === "accepted"
         ? reason.trim()
         : reason || (status === "accepted" ? "Geometri ve ölçüler kontrol edildi" : "Mühendis kararı");
@@ -1150,11 +1342,13 @@ function ElementReview({ api, projectId, element, allElements, assignments, onCh
         reason: relationReason.trim(),
       });
       onChanged();
+      if (kind === "room_boundary") onReanalyze();
     } catch (error) {
       onError((error as Error).message);
     } finally { setBusy(false); }
   }
   const missing = element.required_inputs.filter((key) => !values[key] || Number(values[key]) <= 0);
+  const hasManualChanges = Object.entries(values).some(([key, value]) => value !== "" && Number(value) !== element.measurements[key]);
   const blocking = element.issues.filter((issue) => issue.startsWith("blocking:"));
   const heightEvidence = element.properties.height_evidence as {
     source_name: string;
@@ -1216,21 +1410,35 @@ function ElementReview({ api, projectId, element, allElements, assignments, onCh
   const rebarEvidence = element.element_type === "rebar" ? element.properties as { position_number: number; declared_weight_kg: number; calculated_weight_kg: number; rebar_scope_labels: string[]; table_handle: string } : undefined;
   const elementLabel = typeof element.properties.element_label === "string" ? element.properties.element_label : "";
   const relationAssignments = assignments.filter((item) => item.subject_element_id === element.id && item.approved);
-  const boundaryCandidates = allElements.filter((item) => item.discipline === "architectural" && item.element_type === "room" && item.id !== element.id && item.geometry.kind === "room_boundary");
+  const preferredPlanRegion = String(element.properties.preferred_plan_region_id ?? "");
+  const storedBoundaryCandidates = (Array.isArray(element.properties.boundary_candidates) ? element.properties.boundary_candidates : []) as { id: string; room_code: string; area_m2: number; source_handle: string; plan_region_id: string; preferred_plan_region?: boolean }[];
+  const visibleBoundaryCandidates = allElements.filter((item) => item.source_id === element.source_id && item.discipline === "architectural" && item.element_type === "room" && item.id !== element.id && item.geometry.kind === "room_boundary" && Boolean(item.properties.boundary_method)).map((item) => ({ id: item.id, room_code: String(item.properties.room_code ?? ""), area_m2: item.measurements.area_m2 ?? 0, source_handle: item.source_handle, plan_region_id: String(item.properties.plan_region_id ?? ""), preferred_plan_region: Boolean(preferredPlanRegion && item.properties.plan_region_id === preferredPlanRegion) }));
+  const boundaryCandidates = [...new Map([...storedBoundaryCandidates, ...visibleBoundaryCandidates].map((item) => [item.id, item])).values()].sort((a, b) => {
+    const preferredRank = Number(b.preferred_plan_region) - Number(a.preferred_plan_region);
+    if (preferredRank) return preferredRank;
+    const roomCode = String(element.properties.room_code ?? "");
+    const codeRank = Number(b.room_code === roomCode) - Number(a.room_code === roomCode);
+    if (codeRank) return codeRank;
+    const targetArea = element.measurements.area_m2 ?? 0;
+    return Math.abs(a.area_m2 - targetArea) - Math.abs(b.area_m2 - targetArea);
+  });
+  const displayedBoundaryCandidates = showAlternativeRegions || !preferredPlanRegion ? boundaryCandidates : boundaryCandidates.filter((item) => item.preferred_plan_region);
+  const hasMatchingBoundaryCandidate = boundaryCandidates.filter((item) => !preferredPlanRegion || item.preferred_plan_region).some((item) => {
+    const scheduledArea = element.measurements.area_m2 ?? 0;
+    return scheduledArea > 0 && Math.abs(item.area_m2 - scheduledArea) / scheduledArea <= 0.01;
+  });
   const wallCandidates = allElements.filter((item) => item.discipline === "architectural" && item.element_type === "wall");
-  const roomCandidates = allElements.filter((item) => item.discipline === "architectural" && item.element_type === "room" && item.geometry.kind !== "room_boundary");
-  const blockingMessage = blocking.some((issue) => issue === "blocking:stair_floor_repeat_required")
-    ? "Tip merdivenin uygulanacağı kat aralıkları henüz tanımlanmadı; bu aday kesin metraja kapalıdır."
-    : "Pafta birimi veya kesit kanıtı geometriyle uyuşmuyor. Kaynak eşlemesini düzeltip analizi yeniden çalıştırın.";
+  const roomCandidates = allElements.filter((item) => item.discipline === "architectural" && item.element_type === "room" && item.properties.evidence_only !== true);
+  const blockingMessage = elementBlockingMessage(element, blocking);
   return (
     <div className="element-review">
       <div className="element-title">
         <div>
-          <span className={`status-tag ${element.review_status}`}>{STATUS_LABELS[element.review_status]}</span>
+          <span className={`status-tag ${element.review_status}`}>{reviewStatusLabel(element)}</span>
           <h3>{elementTypeLabel(element.element_type)}{elementLabel ? ` · ${elementLabel}` : ""}</h3>
           <p>{element.floor} · {element.layer} · Handle {element.source_handle || "—"}</p>
         </div>
-        <div className="confidence"><span>Güven</span><strong>%{Math.round(element.confidence * 100)}</strong></div>
+        <div className="confidence" title={`Tespit puanı %${Math.round(element.confidence * 100)}; bu puan ölçü doğruluğu veya mühendis onayı değildir.`}><span>Kaynak kanıtı</span><strong>{element.properties.evidence_only === true ? "Çizim izi" : element.properties.schedule_evidence ? "Çizelge" : element.properties.beam_section_evidence || element.properties.height_evidence ? "Kesit" : element.properties.boundary_element_id ? "Plan sınırı" : "Geometri"}</strong></div>
       </div>
       {missing.length > 0 && (
         <div className="missing-note"><AlertTriangle size={17} /><span>Kesin hesap için eksik: {missing.map((key) => measurementLabel(element.element_type, key)).join(", ")}</span></div>
@@ -1262,15 +1470,23 @@ function ElementReview({ api, projectId, element, allElements, assignments, onCh
       {scheduleEvidence && (
         <div className="evidence-note"><Ruler size={17} /><span><strong>Mahal çizelgesi · {String(element.properties.room_name ?? "")}</strong>{scheduleEvidence.declared_area_text}<small>Tablo {scheduleEvidence.table_handle} · satır {scheduleEvidence.row_number}{element.properties.floor_finish ? ` · döşeme: ${String(element.properties.floor_finish)}` : ""}</small></span></div>
       )}
+      {element.element_type === "room" && scheduleEvidence && <div className={`room-area-check ${element.issues.includes("blocking:room_schedule_geometry_mismatch") ? "mismatch" : ""}`}>
+        <strong>{element.properties.room_area_basis === "schedule_net_gross_plan" ? "Onaylı net/brüt alan dayanağı" : "Çizelge–plan alan kontrolü"}</strong>
+        <span>Çizelge neti <b>{formatQuantity(element.measurements.area_m2 ?? 0)} m²</b> · Plan poligonu <b>{element.measurements.geometric_area_m2 ? `${formatQuantity(element.measurements.geometric_area_m2)} m²` : "eşleşmedi"}</b></span>
+        {element.properties.room_area_basis === "schedule_net_gross_plan" ? <small>Plan poligonu brüt alan payı olarak tutulur; net mahal metrajı çizelgeye dayanır. Duvar kaplaması için ayrıca net çevre gerekir.</small> : typeof element.properties.area_difference_ratio === "number" && <small>Fark %{formatQuantity(element.properties.area_difference_ratio * 100)} · {element.properties.gross_net_basis_available ? "Brüt/net ayrımı için ortak kaynak kararı bekliyor." : "İzin verilen en fazla %1; sınır ve mahal eşleşmesini doğrulayın."}</small>}
+        {Boolean(element.properties.boundary_source_handle) && <small>Sınır handle {String(element.properties.boundary_source_handle)} · çizim bölgesi {String(element.properties.plan_region_id || "belirsiz")}</small>}
+      </div>}
       {stairEvidence && (
         <div className="evidence-note"><Ruler size={17} /><span><strong>Merdiven planı · {stairEvidence.label}</strong>{stairEvidence.step_count} rıhtım · {formatQuantity(stairEvidence.tread_m * 100)}/{formatQuantity(stairEvidence.riser_m * 100)} cm · toplam yükselme {formatQuantity(element.measurements.total_rise_m)} m<small>{stairEvidence.repeat_definition_required ? "Tip merdiven; kat aralığı tekrarı kullanıcı tarafından tanımlanmalı." : stairEvidence.scope_text}</small></span></div>
       )}
       {rebarEvidence && (
         <div className="evidence-note"><Ruler size={17} /><span><strong>Açık donatı metraj satırı · Poz {rebarEvidence.position_number}</strong>Pafta {formatQuantity(rebarEvidence.declared_weight_kg)} kg · formül kontrolü {formatQuantity(rebarEvidence.calculated_weight_kg)} kg<small>Kapsam {rebarEvidence.rebar_scope_labels[0]}–{rebarEvidence.rebar_scope_labels.at(-1)} · tablo handle {rebarEvidence.table_handle}</small></span></div>
       )}
-      {element.discipline === "architectural" && <div className="architectural-relations">
+      {element.properties.evidence_only === true && <div className="evidence-note"><Ruler size={17} /><span><strong>Yalnız çizim kanıtı</strong>Bu iz bağımsız metraj satırı değildir. Eşleştirilebilen fiziksel sınır veya açıklık, ilgili mahal/kapı kararında kullanılabilir.</span></div>}
+      {element.discipline === "architectural" && element.properties.evidence_only !== true && <div className="architectural-relations">
         <div><strong>Mimari ilişki kararları</strong><small>{relationAssignments.length ? `${relationAssignments.length} gerekçeli karar kayıtlı` : "Eksik bağlantılar kesin metrajı engeller."}</small></div>
-        {element.element_type === "room" && element.issues.includes("blocking:room_boundary_assignment_required") && <div className="relation-row"><label>Mahal sınırı<select value={boundaryId} onChange={(event) => setBoundaryId(event.target.value)}><option value="">Sınır seçin</option>{boundaryCandidates.map((item) => <option value={item.id} key={item.id}>{String(item.properties.room_code || item.source_handle)}</option>)}</select></label><button className="button secondary" disabled={busy || !boundaryId || relationReason.trim().length < 3} onClick={() => void saveRelation("room_boundary", [boundaryId])}>Sınırı bağla</button></div>}
+        {element.element_type === "room" && (element.issues.includes("blocking:room_boundary_assignment_required") || element.issues.includes("blocking:room_schedule_geometry_mismatch")) && (boundaryCandidates.length ? <><div className="relation-row"><label>Alternatif plan sınırı<select value={boundaryId} onChange={(event) => setBoundaryId(event.target.value)}><option value="">Sınır seçin</option>{displayedBoundaryCandidates.map((item) => <option value={item.id} key={item.id}>{item.room_code || "Kod yok"} · {formatQuantity(item.area_m2)} m² · {item.plan_region_id || "genel"} · {item.source_handle}</option>)}</select></label><button className="button secondary" disabled={busy || !boundaryId || relationReason.trim().length < 3} onClick={() => void saveRelation("room_boundary", [boundaryId])}>Sınırı bağla ve yeniden analiz et</button></div>{preferredPlanRegion && boundaryCandidates.length > displayedBoundaryCandidates.length && <button className="button secondary" onClick={() => setShowAlternativeRegions(true)}>Kopya/detay bölgelerindeki {boundaryCandidates.length - displayedBoundaryCandidates.length} adayı da göster</button>}</> : <div className="relation-row"><span>Plan sınırı adayları henüz kayıtlı değil.</span><button className="button secondary" disabled={busy} onClick={onReanalyze}>Adayları yeniden tara</button></div>)}
+        {element.element_type === "room" && boundaryCandidates.length > 0 && !hasMatchingBoundaryCandidate && <small>Mevcut sınır adaylarının hiçbiri çizelge alanıyla %1 içinde uyuşmuyor. Sınır seçimi tek başına bu mahali kesin metraja açmaz; plan geometrisi ayrıca doğrulanmalı.</small>}
         {["door", "window"].includes(element.element_type) && <>
           <div className="relation-row"><label>Taşıyıcı duvar<select value={hostWallId} onChange={(event) => setHostWallId(event.target.value)}><option value="">Duvar seçin</option>{wallCandidates.map((item) => <option value={item.id} key={item.id}>{item.source_handle} · {formatQuantity(item.measurements.length_m ?? 0)} m</option>)}</select></label><button className="button secondary" disabled={busy || !hostWallId || relationReason.trim().length < 3} onClick={() => void saveRelation("opening_host", [hostWallId])}>Duvara bağla</button></div>
           <div className="relation-row"><label>Komşu mahaller<select multiple value={roomIds} onChange={(event) => setRoomIds(Array.from(event.target.selectedOptions).map((option) => option.value).slice(0, 2))}>{roomCandidates.map((item) => <option value={item.id} key={item.id}>{String(item.properties.room_code || item.properties.room_name || item.source_handle)}</option>)}</select></label><button className="button secondary" disabled={busy || roomIds.length === 0 || relationReason.trim().length < 3} onClick={() => void saveRelation("opening_rooms", roomIds)}>Mahallere bağla</button></div>
@@ -1280,14 +1496,14 @@ function ElementReview({ api, projectId, element, allElements, assignments, onCh
       </div>}
       <div className="measurement-grid">
         {keys.map((key) => (
-          <label key={key}>{measurementLabel(element.element_type, key)}<input type="number" min="0" step="any" value={values[key] ?? ""} onChange={(event) => setValues((current) => ({ ...current, [key]: event.target.value }))} className={!values[key] && element.required_inputs.includes(key) ? "required" : ""} /></label>
+          <label key={key}>{measurementLabel(element.element_type, key)}<input type="number" min="0" step="any" disabled={element.properties.evidence_only === true} value={values[key] ?? ""} onChange={(event) => setValues((current) => ({ ...current, [key]: event.target.value }))} className={!values[key] && element.required_inputs.includes(key) ? "required" : ""} /></label>
         ))}
       </div>
-      <label>Karar gerekçesi<textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Kontrol edilen pafta, kesit veya düzeltme notu…" /></label>
-      <div className="decision-actions">
+      {element.properties.evidence_only !== true && <label>Karar gerekçesi<textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Kontrol edilen pafta, kesit veya düzeltme notu…" /></label>}
+      {element.properties.evidence_only !== true && <div className="decision-actions">
         <button className="button danger-ghost" disabled={busy} onClick={() => void decide("rejected")}><CircleStop size={16} />Hariç tut</button>
-        <button className="button primary" disabled={busy || missing.length > 0 || blocking.length > 0 || (element.issues.includes("previous_acceptance_changed_after_reanalysis") && reason.trim().length < 3)} onClick={() => void decide("accepted")}><Check size={16} />Onayla ve hesaba kat</button>
-      </div>
+        <button className="button primary" disabled={busy || missing.length > 0 || blocking.length > 0 || ((hasManualChanges || element.issues.includes("previous_acceptance_changed_after_reanalysis")) && reason.trim().length < 3)} onClick={() => void decide("accepted")}><Check size={16} />Onayla ve hesaba kat</button>
+      </div>}
     </div>
   );
 }
@@ -1308,17 +1524,35 @@ function elementBounds(elements: DetectedElement[]): PreviewBounds {
   ];
 }
 
-function previewContext(elements: DetectedElement[], selected?: DetectedElement) {
-  if (!selected) return elements;
-  const sameSource = elements.filter((item) => item.source_id === selected.source_id);
-  for (const property of ["plan_view_id", "plan_region_title", "plan_title"] as const) {
-    const value = selected.properties[property];
-    if (typeof value !== "string" || !value.trim()) continue;
-    const matching = sameSource.filter((item) => item.properties[property] === value);
-    if (matching.length) return matching;
-  }
-  const sameFloor = sameSource.filter((item) => item.floor === selected.floor);
-  return sameFloor.length ? sameFloor : sameSource.length ? sameSource : elements;
+function surroundingBounds(box: PreviewBounds): PreviewBounds {
+  const centerX = (box[0] + box[2]) / 2;
+  const centerY = (box[1] + box[3]) / 2;
+  const width = Math.max(14, (box[2] - box[0]) * 1.8);
+  const height = Math.max(14, (box[3] - box[1]) * 1.8);
+  return [centerX - width / 2, centerY - height / 2, centerX + width / 2, centerY + height / 2];
+}
+
+function elementRegionId(element: DetectedElement) {
+  const stored = element.properties.plan_region_id;
+  if (typeof stored === "string" && stored) return stored;
+  const boundaryHandle = element.properties.boundary_source_handle;
+  const handle = typeof boundaryHandle === "string" ? boundaryHandle : element.source_handle;
+  return handle.includes("/") ? handle.split("/", 1)[0] : "";
+}
+
+function previewRegionId(elements: DetectedElement[], selected?: DetectedElement) {
+  if (!selected) return "";
+  const direct = elementRegionId(selected);
+  if (direct) return direct;
+  const roomId = selected.properties.room_id;
+  const room = typeof roomId === "string" ? elements.find((item) => item.id === roomId) : undefined;
+  if (room && elementRegionId(room)) return elementRegionId(room);
+  const counts = new Map<string, number>();
+  elements.filter((item) => item.source_id === selected.source_id && item.geometry.bbox && item.element_type !== "finish_area").forEach((item) => {
+    const region = elementRegionId(item);
+    if (region) counts.set(region, (counts.get(region) ?? 0) + 1);
+  });
+  return [...counts].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "";
 }
 
 function architecturalRelatedIds(element?: DetectedElement) {
@@ -1332,49 +1566,120 @@ function architecturalRelatedIds(element?: DetectedElement) {
   return values.filter((value): value is string => typeof value === "string" && Boolean(value));
 }
 
-function GeometryPreview({ elements, selectedId, relatedIds = [], onSelect }: { elements: DetectedElement[]; selectedId?: string; relatedIds?: string[]; onSelect: (id: string) => void }) {
+function GeometryPreview({ api, projectId, elements, selectedId, relatedIds = [], onSelect }: { api: EngineApi; projectId: string; elements: DetectedElement[]; selectedId?: string; relatedIds?: string[]; onSelect: (id: string) => void }) {
   const drawingElements = useMemo(
-    () => elements.filter((item) => !item.geometry.kind.endsWith("_schedule_row") && Boolean(item.geometry.bbox)),
+    () => elements.filter((item) => item.element_type !== "finish_area" && !item.geometry.kind.endsWith("_schedule_row") && Boolean(item.geometry.bbox)),
     [elements],
   );
   const selectedElement = elements.find((item) => item.id === selectedId);
   const selectedDrawing = drawingElements.find((item) => item.id === selectedId);
-  const contextElements = useMemo(
-    () => previewContext(drawingElements, selectedElement),
-    [drawingElements, selectedElement],
-  );
-  const [mode, setMode] = useState<PreviewMode>("context");
+  const selectedFocusBounds = selectedDrawing?.geometry.bbox ? surroundingBounds(selectedDrawing.geometry.bbox) : undefined;
+  const sourceId = selectedElement?.source_id ?? "";
+  const suggestedRegionId = previewRegionId(elements, selectedElement);
+  const [manualRegionId, setManualRegionId] = useState<string | null>(null);
+  const regionId = manualRegionId ?? suggestedRegionId;
+  const regions = useMemo(() => {
+    const counts = new Map<string, number>();
+    drawingElements.filter((item) => item.source_id === sourceId).forEach((item) => {
+      const id = elementRegionId(item);
+      if (id) counts.set(id, (counts.get(id) ?? 0) + 1);
+    });
+    return [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  }, [drawingElements, sourceId]);
+  const contextElements = drawingElements.filter((item) => item.source_id === sourceId && (regionId ? elementRegionId(item) === regionId : true));
+  const [mode, setMode] = useState<PreviewMode>("selected");
   const [zoom, setZoom] = useState(1);
+  const [rawDrawing, setRawDrawing] = useState<SourceDrawingPreview | null>(null);
+  const [rawError, setRawError] = useState("");
+  const [rawLoading, setRawLoading] = useState(false);
+  const [rawLoadingMore, setRawLoadingMore] = useState(false);
+  const [showLabels, setShowLabels] = useState(false);
+  const [showLayers, setShowLayers] = useState(false);
+  const [hiddenRoles, setHiddenRoles] = useState<string[]>([]);
+  const [hiddenLayers, setHiddenLayers] = useState<string[]>([]);
+  const [layerSearch, setLayerSearch] = useState("");
+  const [pan, setPan] = useState<[number, number]>([0, 0]);
+  const dragStart = useRef<{ x: number; y: number; pan: [number, number] } | null>(null);
   useEffect(() => {
-    setMode("context");
+    setManualRegionId(null);
+    setMode("selected");
     setZoom(1);
+    setPan([0, 0]);
   }, [selectedId]);
+  useEffect(() => { setHiddenLayers([]); setLayerSearch(""); }, [sourceId]);
+  useEffect(() => {
+    let current = true;
+    setRawDrawing(null);
+    setRawError("");
+    if (!sourceId) return () => { current = false; };
+    setRawLoading(true);
+    void api.sourcePreview(projectId, sourceId, regionId, 0, mode === "selected" ? selectedFocusBounds : undefined).then((drawing) => {
+      if (current) setRawDrawing(drawing);
+    }).catch((error: Error) => {
+      if (current) setRawError(error.message);
+    }).finally(() => {
+      if (current) setRawLoading(false);
+    });
+    return () => { current = false; };
+  }, [api, projectId, sourceId, regionId, mode, selectedId]);
+  const layerCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    rawDrawing?.strokes.forEach((stroke) => counts.set(stroke.layer || "0", (counts.get(stroke.layer || "0") ?? 0) + 1));
+    return [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  }, [rawDrawing]);
+  async function loadMoreDrawing() {
+    if (!sourceId || !rawDrawing?.next_offset || rawLoadingMore) return;
+    const offset = rawDrawing.next_offset;
+    setRawLoadingMore(true);
+    try {
+      const page = await api.sourcePreview(projectId, sourceId, regionId, offset, mode === "selected" ? selectedFocusBounds : undefined);
+      setRawDrawing((current) => {
+        if (!current || current.source_id !== sourceId || current.region_id !== regionId || current.next_offset !== offset) return current;
+        const a = current.bounds;
+        const b = page.bounds;
+        return { ...current, strokes: [...current.strokes, ...page.strokes],
+          bounds: a && b ? [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[2], b[2]), Math.max(a[3], b[3])] : a ?? b,
+          truncated: page.truncated, next_offset: page.next_offset };
+      });
+    } catch (error) { setRawError(error instanceof Error ? error.message : String(error)); }
+    finally { setRawLoadingMore(false); }
+  }
   const visibleElements = mode === "all"
     ? drawingElements
     : mode === "selected" && selectedDrawing
       ? [selectedDrawing]
       : contextElements;
-  const focusBounds = elementBounds(visibleElements);
+  const rawVisible = mode !== "all" && Boolean(rawDrawing);
+  const focusBounds = mode === "selected" && selectedFocusBounds
+    ? selectedFocusBounds
+    : mode === "context" && rawDrawing?.bounds ? rawDrawing.bounds : elementBounds(visibleElements);
   const [x1, y1, x2, y2] = focusBounds;
   const baseWidth = Math.max(x2 - x1, 0.5);
   const baseHeight = Math.max(y2 - y1, 0.5);
-  const centerX = (x1 + x2) / 2;
-  const centerY = (y1 + y2) / 2;
+  const centerX = (x1 + x2) / 2 + pan[0];
+  const centerY = (y1 + y2) / 2 + pan[1];
   const viewWidth = baseWidth / zoom;
   const viewHeight = baseHeight / zoom;
   const pad = Math.max(viewWidth, viewHeight) * 0.08;
   const viewBox = `${centerX - viewWidth / 2 - pad} ${-(centerY + viewHeight / 2 + pad)} ${viewWidth + pad * 2} ${viewHeight + pad * 2}`;
 
   return <div className="drawing">
-    <div className="drawing-scope">{mode === "all" ? "Tüm kaynaklar" : mode === "selected" ? "Seçili eleman" : "Aktif pafta"}<span>{visibleElements.length}/{drawingElements.length}</span></div>
+    <div className="drawing-scope">{mode === "all" ? "Tüm tespitler" : mode === "selected" ? "Eleman çevresi" : "Çizim bölgesi"}<span>{mode === "all" ? visibleElements.length : regionId || "genel"} · {visibleElements.length} tespit</span></div>
+    {mode === "context" && regions.length > 1 && <label className="drawing-region">Pafta/bölge <select value={regionId} onChange={(event) => { setManualRegionId(event.target.value); setZoom(1); setPan([0, 0]); }} aria-label="DXF çizim bölgesini seç"><option value="">Tüm kaynak</option>{regions.map(([id, count]) => <option key={id} value={id}>{id} · {count} tespit{id === suggestedRegionId ? " · önerilen" : ""}</option>)}</select></label>}
     <div className="drawing-controls">
       <button title="Uzaklaştır" onClick={() => setZoom((value) => Math.max(0.5, value / 1.35))}><ZoomOut size={15} /></button>
       <button title="Yakınlaştır" onClick={() => setZoom((value) => Math.min(12, value * 1.35))}><ZoomIn size={15} /></button>
-      <button title="Seçili elemana odaklan" className={mode === "selected" ? "active" : ""} disabled={!selectedDrawing?.geometry.bbox} onClick={() => { setMode("selected"); setZoom(1); }}><Focus size={15} /></button>
-      <button title="Seçili elemanın bulunduğu paftayı göster" className={`text ${mode === "context" ? "active" : ""}`} onClick={() => { setMode("context"); setZoom(1); }}>Pafta</button>
-      <button title="Bütün kaynak geometrilerini göster" className={`text ${mode === "all" ? "active" : ""}`} onClick={() => { setMode("all"); setZoom(1); }}>Tümü</button>
+      <button title="Seçili elemanın çevresini göster" className={mode === "selected" ? "active" : ""} disabled={!selectedDrawing?.geometry.bbox} onClick={() => { setMode("selected"); setZoom(1); setPan([0, 0]); }}><Focus size={15} /></button>
+      <button title="Seçili elemanın bulunduğu gerçek DXF çizim bölgesini göster" className={`text ${mode === "context" ? "active" : ""}`} onClick={() => { setMode("context"); setZoom(1); setPan([0, 0]); }}>Plan</button>
+      <button title="Yalnız tüm tespitleri göster" className={`text ${mode === "all" ? "active" : ""}`} onClick={() => { setMode("all"); setZoom(1); setPan([0, 0]); }}>Tespitler</button>
+      <button title="DXF yazılarını göster veya gizle" className={`text ${showLabels ? "active" : ""}`} onClick={() => setShowLabels((value) => !value)}>Yazılar</button>
+      <button title="Çizim katmanlarını göster veya gizle" className={`text ${showLayers ? "active" : ""}`} onClick={() => setShowLayers((value) => !value)}>Katmanlar</button>
     </div>
-    <svg viewBox={viewBox} preserveAspectRatio="xMidYMid meet">{visibleElements.map((element) => {
+    {showLayers && <div className="drawing-layers" aria-label="DXF katman görünürlüğü"><strong>Çizim türleri</strong>{([ ["wall", "Duvar"], ["opening", "Açıklık"], ["room", "Mahal"], ["annotation", "Ölçü"], ["other", "Diğer"] ] as const).map(([role, label]) => <label key={role}><input type="checkbox" checked={!hiddenRoles.includes(role)} onChange={() => setHiddenRoles((roles) => roles.includes(role) ? roles.filter((item) => item !== role) : [...roles, role])} />{label}</label>)}<strong>DXF katmanları ({layerCounts.length})</strong><input type="search" value={layerSearch} onChange={(event) => setLayerSearch(event.target.value)} placeholder="Katman ara" aria-label="DXF katmanı ara" />{layerCounts.filter(([name]) => name.toLocaleLowerCase("tr").includes(layerSearch.toLocaleLowerCase("tr"))).map(([name, count]) => <label key={name} title={name}><input type="checkbox" checked={!hiddenLayers.includes(name)} onChange={() => setHiddenLayers((layers) => layers.includes(name) ? layers.filter((item) => item !== name) : [...layers, name])} /><span>{name}</span><small>{count}</small></label>)}</div>}
+    <svg viewBox={viewBox} preserveAspectRatio="xMidYMid meet" onPointerDown={(event) => { if (event.target !== event.currentTarget) return; dragStart.current = { x: event.clientX, y: event.clientY, pan }; event.currentTarget.setPointerCapture(event.pointerId); }} onPointerMove={(event) => { if (!dragStart.current) return; const rect = event.currentTarget.getBoundingClientRect(); const spanX = viewWidth + pad * 2; const spanY = viewHeight + pad * 2; setPan([dragStart.current.pan[0] - (event.clientX - dragStart.current.x) / rect.width * spanX, dragStart.current.pan[1] + (event.clientY - dragStart.current.y) / rect.height * spanY]); }} onPointerUp={() => { dragStart.current = null; }} onPointerCancel={() => { dragStart.current = null; }} onWheel={(event) => { if (event.ctrlKey || event.metaKey) return; setZoom((value) => Math.max(0.5, Math.min(12, value * (event.deltaY < 0 ? 1.15 : 1 / 1.15)))); }}>
+      {rawVisible && rawDrawing?.strokes.filter((stroke) => !hiddenRoles.includes(stroke.role) && !hiddenLayers.includes(stroke.layer || "0")).map((stroke, index) => <polyline key={`raw-${index}`} points={stroke.points.map(([x, y]) => `${x},${-y}`).join(" ")} className={`raw-line ${stroke.role}`} vectorEffect="non-scaling-stroke" />)}
+      {rawVisible && showLabels && rawDrawing?.texts.map((label, index) => <text key={`raw-text-${index}`} x={label.x} y={-label.y} className="raw-text" fontSize={label.height_m}>{label.text}</text>)}
+      {visibleElements.map((element) => {
       const points = element.geometry.points;
       const box = element.geometry.bbox;
       const coords = points.length > 1
@@ -1382,23 +1687,27 @@ function GeometryPreview({ elements, selectedId, relatedIds = [], onSelect }: { 
         : box ? `${box[0]},${-box[1]} ${box[2]},${-box[1]} ${box[2]},${-box[3]} ${box[0]},${-box[3]} ${box[0]},${-box[1]}` : "";
       return coords && <polyline key={element.id} points={coords} className={`${element.review_status} ${selectedId === element.id ? "selected" : ""} ${relatedIds.includes(element.id) ? "related" : ""}`} vectorEffect="non-scaling-stroke" onClick={() => onSelect(element.id)} />;
     })}</svg>
-    {drawingElements.length === 0 && <div className="drawing-empty">Analiz sonrası geometri burada görünür.</div>}
-    {drawingElements.length > 0 && visibleElements.length === 0 && <div className="drawing-empty">Bu kayıtta çizilebilir plan geometrisi yok.</div>}
+    {rawLoading && <div className="drawing-message">Kaynak DXF çizimi açılıyor…</div>}
+    {!rawLoading && rawError && mode !== "all" && <div className="drawing-message error">Ham DXF gösterilemedi: {rawError}</div>}
+    {rawDrawing?.next_offset !== null && rawDrawing?.next_offset !== undefined && mode !== "all" && <div className="drawing-message warning">{rawDrawing.strokes.length.toLocaleString("tr-TR")} çizgi yüklendi. <button disabled={rawLoadingMore} onClick={() => void loadMoreDrawing()}>{rawLoadingMore ? "Yükleniyor…" : "Sonraki çizgileri yükle"}</button></div>}
+    {rawDrawing?.truncated && rawDrawing.next_offset === null && mode !== "all" && <div className="drawing-message warning">Yazı önizlemesi sınırlı; ölçü için kaynak dosyayı kontrol edin.</div>}
+    {!rawLoading && !rawDrawing && !rawError && visibleElements.length === 0 && <div className="drawing-empty">Bu kayıtta çizilebilir plan geometrisi yok.</div>}
   </div>;
 }
 
-function QuantitiesView({ api, projectId, quantities, pendingCount, onReview, onCommercial, onMessage }: { api: EngineApi; projectId: string; quantities: QuantityLine[]; pendingCount: number; onReview: () => void; onCommercial: () => void; onMessage: (message: string) => void }) {
+function QuantitiesView({ api, projectId, quantities, pendingCount, structuralBlockers, onReview, onCommercial, onMessage }: { api: EngineApi; projectId: string; quantities: QuantityLine[]; pendingCount: number; structuralBlockers: string[]; onReview: () => void; onCommercial: () => void; onMessage: (message: string) => void }) {
   const totals = useMemo(() => { const grouped = new Map<string, { category: string; unit: string; value: number }>(); quantities.forEach((line) => { const key = `${line.category}|${line.unit}`; const current = grouped.get(key) ?? { category: line.category, unit: line.unit, value: 0 }; current.value += line.quantity; grouped.set(key, current); }); return Array.from(grouped.values()); }, [quantities]);
+  const incomplete = pendingCount > 0 || structuralBlockers.length > 0;
   async function exportPayload() { const result = await api.exportReport(projectId); onMessage(`Excel raporu oluşturuldu: ${result.path}`); }
   return <div className="stack">
-    <section className={`callout ${pendingCount || quantities.length === 0 ? "warning" : "success"}`}>
-      {pendingCount || quantities.length === 0 ? <AlertTriangle size={22} /> : <ShieldCheck size={22} />}
-      <div><strong>{quantities.length === 0 ? "Henüz kesin metraj yok" : pendingCount ? "Bekleyen elemanlar toplam dışında" : "Mühendis onaylı kesin metraj"}</strong><p>{pendingCount ? `${pendingCount} eleman onaylanana kadar aşağıdaki toplamlara dahil edilmez.` : quantities.length === 0 ? "Ölçüleri kontrol edip uygun elemanları onaylayın." : "Tüm satırlar onaylı bir kaynak elemana ve açık formüle bağlıdır."}</p></div>
-      {(pendingCount > 0 || quantities.length === 0) && <button className="button secondary" onClick={onReview}>Ölçüleri kontrol et <ChevronRight size={15} /></button>}
+    <section className={`callout ${incomplete || quantities.length === 0 ? "warning" : "success"}`}>
+      {incomplete || quantities.length === 0 ? <AlertTriangle size={22} /> : <ShieldCheck size={22} />}
+      <div><strong>{quantities.length === 0 ? "Henüz kesin metraj yok" : incomplete ? "Kısmi onaylı metraj · tam toplam kilitli" : "Mühendis onaylı kesin metraj"}</strong><p>{pendingCount ? `${pendingCount} eleman kararı bekliyor. Yalnız onaylı satırlar kısmi toplama girer.` : quantities.length === 0 ? "Ölçüleri kontrol edip uygun elemanları onaylayın." : "Tüm satırlar onaylı bir kaynak elemana ve açık formüle bağlıdır."} {structuralBlockers.join(" ")}</p></div>
+      {(incomplete || quantities.length === 0) && <button className="button secondary" onClick={onReview}>Ölçüleri kontrol et <ChevronRight size={15} /></button>}
     </section>
     <div className="metric-grid">{totals.length ? totals.map((total) => <div className="metric-card" key={`${total.category}-${total.unit}`}><span>{total.category}</span><strong>{formatQuantity(total.value)}</strong><small>{total.unit}</small></div>) : <div className="metric-card empty"><span>Henüz kesin metraj yok</span><strong>—</strong><small>Onay bekleniyor</small></div>}</div>
-    <section className="panel"><div className="section-heading"><div><span className="eyebrow">İZLENEBİLİR METRAJ</span><h2>{quantities.length} hesap satırı</h2></div><button className="button primary" disabled={quantities.length === 0} onClick={() => void exportPayload()}><FileSpreadsheet size={17} /> Excel raporu hazırla</button></div><div className="quantity-table"><div className="quantity-head"><span>Kat / Disiplin</span><span>Kalem</span><span>Formül</span><span>Miktar</span></div>{quantities.map((line) => <div className="quantity-row" key={line.id}><span><strong>{line.floor}</strong><small>{disciplineLabel(line.discipline)}</small></span><span><strong>{line.description}</strong><small>{line.element_id.slice(-10)}</small></span><code>{line.formula}</code><span className="quantity-value">{formatQuantity(line.quantity)} <small>{line.unit}</small></span></div>)}{quantities.length === 0 && <EmptyState icon={<FileSpreadsheet />} title="Onaylı hesap satırı yok" detail="Ölçüleri kontrol edip uygun elemanları onaylayın." />}</div></section>
-    {quantities.length > 0 && pendingCount === 0 && <div className="footer-action"><p>İsterseniz onaylı metrajı birim fiyatlarla eşleştirerek teklif hazırlayabilirsiniz.</p><button className="button secondary" onClick={onCommercial}><BadgeDollarSign size={16} /> Teklif hazırla</button></div>}
+    <section className="panel"><div className="section-heading"><div><span className="eyebrow">İZLENEBİLİR METRAJ</span><h2>{quantities.length} hesap satırı</h2></div><button className="button primary" disabled={quantities.length === 0} onClick={() => void exportPayload()}><FileSpreadsheet size={17} /> {incomplete ? "Kısmi Excel raporu" : "Excel raporu hazırla"}</button></div><div className="quantity-table"><div className="quantity-head"><span>Kat / Disiplin</span><span>Kalem</span><span>Formül</span><span>Miktar</span></div>{quantities.map((line) => <div className="quantity-row" key={line.id}><span><strong>{line.floor}</strong><small>{disciplineLabel(line.discipline)}</small></span><span><strong>{line.description}</strong><small>{line.element_id.slice(-10)}</small></span><code>{line.formula}</code><span className="quantity-value">{formatQuantity(line.quantity)} <small>{line.unit}</small></span></div>)}{quantities.length === 0 && <EmptyState icon={<FileSpreadsheet />} title="Onaylı hesap satırı yok" detail="Ölçüleri kontrol edip uygun elemanları onaylayın." />}</div></section>
+    {quantities.length > 0 && !incomplete && <div className="footer-action"><p>İsterseniz onaylı metrajı birim fiyatlarla eşleştirerek teklif hazırlayabilirsiniz.</p><button className="button secondary" onClick={onCommercial}><BadgeDollarSign size={16} /> Teklif hazırla</button></div>}
   </div>;
 }
 
@@ -1528,14 +1837,34 @@ function viewTitle(view: View) { return ({ sources: "Dosyaları ekle", floors: "
 function viewDescription(view: View) { return ({ sources: "DXF, PDF veya Excel dosyalarını bu projeye ekleyin.", floors: "Yalnız gerekli katları ve onaylı tekrarları tanımlayın.", mapping: "Eksik birim, ölçek ve pafta görevlerini doğrulayın.", review: "Bulunan elemanları ve ölçülerini inceleyip onaylayın.", quantities: "Yalnız onaylı metrajı görün ve Excel raporu alın.", commercial: "İsterseniz metrajı birim fiyatlarla eşleştirin.", revisions: "İki pafta arasındaki değişiklikleri inceleyin." })[view]; }
 function disciplineLabel(value: Discipline) { return DISCIPLINES.find((item) => item.value === value)?.label ?? value; }
 function floorKindLabel(value: FloorKind) { return FLOOR_KINDS.find((item) => item.value === value)?.label ?? value; }
-function sheetKindLabel(value: SheetKind) { return SHEET_KINDS.find((item) => item.value === value)?.label ?? value; }
+function sheetKindLabel(value: SheetKind, discipline?: Discipline) { if (value === "plan" && discipline === "structural") return "Kalıp planı"; if (value === "plan" && discipline === "architectural") return "Mimari kat planı"; return SHEET_KINDS.find((item) => item.value === value)?.label ?? value; }
+function elementBlockingMessage(element: DetectedElement, blocking: string[]) {
+  if (blocking.includes("blocking:unmatched_room_boundary_evidence_only")) return "Bu sınır henüz bir mahal çizelgesi satırıyla eşleşmedi. Yalnız çizim kanıtıdır; bağımsız mahal metrajı olarak onaylanamaz.";
+  if (blocking.includes("blocking:annotation_opening_not_physical")) return "Bu aday ölçü/açıklama katmanından geldi. Fiziksel kapı veya pencere olarak sayılmaz; doğru plan elemanını seçin.";
+  if (blocking.includes("blocking:opening_decision_required")) return "Bu net alan, henüz onaylanmamış veya hariç tutulmamış kapı/pencereye bağlı. Önce açıklık kararlarını tamamlayın; alan otomatik yenilenir.";
+  if (blocking.includes("blocking:opening_vertical_position_required")) return "Alt/üst duvar kaplamasına açıklık düşümü için kapı/pencerenin bitmiş döşemeden alt kotu gerekir. Kaynak kesitten doğrulayın; oransal tahmin kesin metraja girmez.";
+  if (blocking.includes("blocking:net_room_perimeter_required")) return "Bu mahalin plan poligonu brüt alan payıdır. İç duvar kaplaması için net mahal çevresi/duvar yüzleri ayrıca kanıtlanmalı; brüt çevre kesin hesaba alınmaz.";
+  if (blocking.includes("blocking:drawing_unit_evidence_mismatch")) return "Bu dosyada yazılı ölçü ve geometri seçili birimde uyuşmuyor. Birimi kaynak ayarlarında bir kez doğrulayıp analizi yenileyin.";
+  if (blocking.includes("blocking:room_schedule_geometry_mismatch")) {
+    const declared = element.measurements.area_m2;
+    const geometric = element.measurements.geometric_area_m2;
+    if (declared && geometric) return `Mahal çizelgesi ${formatQuantity(declared)} m², eşlenen çizim sınırı ${formatQuantity(geometric)} m² (%${formatQuantity(Math.abs(geometric - declared) / declared * 100)} fark). Sınır veya mahal eşleşmesini kontrol edin; değer otomatik değiştirilmez.`;
+    return "Mahal çizelgesi ve çizim sınırı uyuşmuyor. Sınır eşleşmesini kontrol edin.";
+  }
+  if (blocking.includes("blocking:room_boundary_assignment_required")) return "Bu mahalin plan sınırı güvenle eşleşmedi. Doğru sınırı seçip gerekçeyle kaydedin.";
+  if (blocking.includes("blocking:opening_host_wall_required")) return "Bu açıklığın hangi duvarda olduğu kanıtlanamadı. Duvarı plandan seçip ilişkiyi kaydedin.";
+  if (blocking.includes("blocking:opening_schedule_match_required")) return "Kapı/pencere tipi çizelgeyle eşleşmedi; yükseklik ve malzeme kesinleşmedi.";
+  if (blocking.includes("blocking:opening_room_assignment_required")) return "Açıklığın komşu mahalleri güvenle bulunamadı. İlgili mahalleri plandan seçin.";
+  if (blocking.includes("blocking:stair_floor_repeat_required")) return "Tip merdivenin uygulanacağı kat aralıkları henüz tanımlanmadı; bu aday kesin metraja kapalıdır.";
+  return "Bu elemanın ölçüsü veya kaynak ilişkisi henüz doğrulanamadı; kesin metraja eklenmez.";
+}
 function elementTypeLabel(value: string) { return ({ column: "Kolon", beam: "Kiriş", shear_wall: "Perde", slab: "Döşeme", slab_opening: "Döşeme boşluğu", raft: "Radye temel", foundation: "Temel", stair: "Merdiven", rebar: "Donatı", wall: "Duvar", door: "Kapı", window: "Pencere", room: "Mahal", finish_area: "Kaplama", pipe: "Boru", duct: "Kanal", mechanical_fitting: "Fittings", mechanical_equipment: "Mekanik cihaz", cable: "Kablo", cable_tray: "Kablo tavası", light: "Armatür", socket: "Priz", panel: "Pano", electrical_item: "Elektrik ekipmanı", landscape_area: "Peyzaj alanı", landscape_linear: "Bordür / hat", landscape_item: "Bitki / ekipman", schedule_item: "Poz çizelgesi", pdf_evidence: "PDF kanıtı" } as Record<string, string>)[value] ?? value; }
 function measurementLabel(elementType: string, key: string) { if (elementType === "beam" && key === "height_m") return "Kesit yüksekliği (m)"; if (elementType === "beam" && key === "width_m") return "Kesit genişliği (m)"; return MEASUREMENT_LABELS[key] ?? key; }
 function formatQuantity(value: number) { return new Intl.NumberFormat("tr-TR", { maximumFractionDigits: 3 }).format(value); }
 function formatSigned(value: number) { return `${value >= 0 ? "+" : ""}${formatQuantity(value)}`; }
 function revisionMeasurements(values: Record<string, number>) { const keys = ["width_m", "depth_m", "height_m", "length_m", "area_m2", "thickness_m", "void_area_m2", "plan_area_m2", "total_rise_m"]; const parts = keys.filter((key) => values[key] !== undefined).map((key) => `${measurementLabel("", key)}: ${formatQuantity(values[key])}`); return parts.length ? parts.join(" · ") : "—"; }
-function sourceStatusReady(source: SourceFile) { if (source.source_format === "pdf") return source.calibration_status === "confirmed"; if (source.source_format !== "dxf") return true; return source.unit_confirmed || source.detected_unit !== "unknown"; }
-function sourceStatusLabel(source: SourceFile) { if (source.source_format === "pdf") return source.calibration_status === "confirmed" ? "ölçek onaylı" : "ölçek bekliyor"; if (source.source_format !== "dxf") return source.source_format.toUpperCase(); return source.unit_confirmed ? source.drawing_unit : source.detected_unit !== "unknown" ? `${source.detected_unit} algılandı` : "birim bekliyor"; }
+function sourceStatusReady(source: SourceFile) { if (source.source_format === "pdf") return source.calibration_status === "confirmed"; if (source.source_format !== "dxf") return true; return source.unit_confirmed && (source.detected_unit === "unknown" || source.drawing_unit === source.detected_unit); }
+function sourceStatusLabel(source: SourceFile) { if (source.source_format === "pdf") return source.calibration_status === "confirmed" ? "ölçek onaylı" : "ölçek bekliyor"; if (source.source_format !== "dxf") return source.source_format.toUpperCase(); if (source.unit_confirmed && source.detected_unit !== "unknown" && source.drawing_unit !== source.detected_unit) return `${source.drawing_unit} · DXF ${source.detected_unit} ⚠`; return source.unit_confirmed ? source.drawing_unit : source.detected_unit !== "unknown" ? `${source.detected_unit} algılandı` : "birim bekliyor"; }
 function sourceNeedsSetup(source: SourceFile) {
   if (source.source_format === "pdf") return source.calibration_status !== "confirmed";
   if (source.source_format !== "dxf") return false;

@@ -836,6 +836,60 @@ def _match_beam_annotation(
     return annotation
 
 
+def inspect_structural_unit(document) -> tuple[DrawingUnit | None, list[str], DrawingUnit | None]:
+    """Suggest a drawing unit only when plan geometry agrees with written sections.
+
+    Column sizes and building span provide a candidate, but are not proof on
+    their own. Independent beam section labels must corroborate the candidate.
+    """
+    clusters = _candidate_clusters(document)
+    selected, _ = _select_clusters(clusters)
+    geometric_candidate = _suggest_unit(selected)
+    if geometric_candidate is None:
+        return None, [], None
+
+    scale = unit_scale(geometric_candidate)
+    label_checks: dict[str, list[bool]] = defaultdict(list)
+    for cluster in selected:
+        annotations = _beam_annotations_with_sibling_evidence(document, cluster, clusters, scale)
+        used_handles: set[str] = set()
+        for _, _, raw_box, orientation in _beam_pairs(cluster, scale):
+            annotation = _match_beam_annotation(
+                raw_box, orientation, annotations, used_handles, scale
+            )
+            if annotation is None:
+                continue
+            label = f"{annotation.label}:{annotation.section_width_m:g}"
+            raw_width = (
+                raw_box[3] - raw_box[1] if orientation == "horizontal" else raw_box[2] - raw_box[0]
+            )
+            label_checks[label].append(
+                abs(raw_width * scale - annotation.section_width_m)
+                <= max(0.015, annotation.section_width_m * 0.06)
+            )
+
+    agreeing_count = sum(all(checks) for checks in label_checks.values())
+    matched_count = len(label_checks)
+    if matched_count >= 3 and agreeing_count / matched_count >= 0.8:
+        return (
+            geometric_candidate,
+            [
+                f"{agreeing_count}/{matched_count} farklı kiriş kesit etiketi çizim "
+                f"genişliğiyle {geometric_candidate.value} biriminde eşleşiyor",
+                "Kolon ölçüleri ve bina açıklığı aynı birimi destekliyor",
+            ],
+            geometric_candidate,
+        )
+    return (
+        None,
+        [
+            f"Kolon geometrisi {geometric_candidate.value} birimini düşündürüyor; "
+            f"yazılı kiriş kesitleri yeterince doğrulamadı ({agreeing_count}/{matched_count})"
+        ],
+        geometric_candidate,
+    )
+
+
 def _ranges_overlap(
     first: tuple[float, float],
     second: tuple[float, float],
