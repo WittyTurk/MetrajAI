@@ -50,7 +50,7 @@ def main() -> None:
             check=True,
         )
     else:
-        print("Özel pilot DXF'leri bulunmadı; yerel pilot doğrulaması atlandı.")
+        print("Private pilot DXF files not found; local pilot validation skipped.")
     subprocess.run(
         [
             sys.executable,
