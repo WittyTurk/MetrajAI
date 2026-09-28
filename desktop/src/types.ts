@@ -47,6 +47,7 @@ export interface ProjectSummary {
   price_catalog_count: number;
   offer_scenario_count: number;
   validation_gates: ValidationGate[];
+  source_safety_notices?: string[];
 }
 
 export interface SourceFile {
@@ -66,6 +67,18 @@ export interface SourceFile {
   calibration_status: CalibrationStatus;
   calibration_scale: number | null;
   sha256: string;
+}
+
+export interface SourceInspection {
+  source_format: SourceFormat;
+  header_unit: DrawingUnit;
+  suggested_unit: DrawingUnit;
+  unit_conflict: boolean;
+  requires_unit_confirmation: boolean;
+  unit_evidence: string[];
+  area_ratio: number | null;
+  suggested_discipline: Discipline | null;
+  discipline_evidence: string[];
 }
 
 export interface FloorDefinition {

@@ -53,6 +53,7 @@ import type {
   ReviewStatus,
   SheetKind,
   SourceFile,
+  SourceInspection,
   ValidationGate,
 } from "./types";
 
@@ -333,6 +334,7 @@ function App() {
         </header>
 
         {message && <div className="banner error"><AlertTriangle size={18} /><span>{message}</span><button onClick={() => setMessage("")}><X size={16} /></button></div>}
+        {project.source_safety_notices?.map((notice) => <div className="banner error" key={notice}><AlertTriangle size={18} /><span>{notice}</span></div>)}
 
         {view === "sources" && <SourcesView api={api} project={project} sources={sources} setupIssueCount={setupIssueCount} onChanged={() => void refresh()} onNext={continueToReview} onError={setMessage} />}
         {view === "floors" && <FloorsView api={api} projectId={project.project.project_id} sources={sources} elements={elements} floors={floors} repeatAssignments={repeatAssignments} onChanged={() => void refresh()} onError={setMessage} onNext={() => setView("mapping")} />}
@@ -612,30 +614,70 @@ function ToolNavItem({ icon, label, active, onClick }: { icon: React.ReactNode; 
 
 function SourcesView({ api, project, sources, setupIssueCount, onChanged, onNext, onError }: { api: EngineApi; project: ProjectSummary; sources: SourceFile[]; setupIssueCount: number; onChanged: () => void; onNext: () => void; onError: (message: string) => void }) {
   const [path, setPath] = useState("");
-  const [discipline, setDiscipline] = useState<Discipline>("structural");
+  const [discipline, setDiscipline] = useState<Discipline | "">("");
   const [role, setRole] = useState("kalip");
   const [floor, setFloor] = useState("GENEL");
   const [floorKind, setFloorKind] = useState<FloorKind>("general");
-  const [sheetKind, setSheetKind] = useState<SheetKind>("plan");
+  const [sheetKind, setSheetKind] = useState<SheetKind>("unspecified");
   const [revision, setRevision] = useState("");
   const [unit, setUnit] = useState<DrawingUnit>("unknown");
+  const [inspection, setInspection] = useState<SourceInspection | null>(null);
+  const [inspecting, setInspecting] = useState(false);
+  const [inspectionError, setInspectionError] = useState("");
+  const inspectionRequest = useRef(0);
   const [busy, setBusy] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
+
+  function changePath(value: string) {
+    inspectionRequest.current += 1;
+    setPath(value);
+    setInspection(null);
+    setInspectionError("");
+    setDiscipline("");
+    setSheetKind("unspecified");
+    setUnit("unknown");
+    setInspecting(false);
+  }
+
+  async function inspectPath(value: string) {
+    if (!value.trim()) return;
+    const requestId = ++inspectionRequest.current;
+    setInspecting(true);
+    setInspectionError("");
+    try {
+      const result = await api.inspectSource(value.trim());
+      if (requestId === inspectionRequest.current) setInspection(result);
+    } catch (error) {
+      if (requestId === inspectionRequest.current) setInspectionError((error as Error).message);
+    } finally {
+      if (requestId === inspectionRequest.current) setInspecting(false);
+    }
+  }
+
+  function chooseDiscipline(next: Discipline) {
+    setDiscipline(next);
+    setRole(defaultSourceRole(next, sheetKind));
+  }
 
   async function chooseFile() {
     try {
       const selected = isTauri()
         ? await open({ multiple: false, filters: [{ name: "Proje kaynakları", extensions: ["dxf", "xlsx", "xls", "pdf"] }] })
         : (await api.selectFile("DXF, Excel veya PDF kaynak dosyasını seçin")).path;
-      if (typeof selected === "string") setPath(selected);
+      if (typeof selected === "string") {
+        changePath(selected);
+        await inspectPath(selected);
+      }
     } catch (dialogError) {
       onError((dialogError as Error).message);
     }
   }
 
   async function addSource() {
-    if (!path || !role.trim()) return;
+    if (!path || !inspection || !discipline || !role.trim()) return;
+    if (inspection.source_format === "dxf" && sheetKind === "unspecified") return;
+    if (inspection.requires_unit_confirmation && unit === "unknown") return;
     setBusy(true);
     try {
       await api.importSource(project.project.project_id, {
@@ -649,7 +691,7 @@ function SourcesView({ api, project, sources, setupIssueCount, onChanged, onNext
         revision,
         drawing_unit: unit,
       });
-      setPath("");
+      changePath("");
       onChanged();
     } catch (error) {
       onError((error as Error).message);
@@ -696,12 +738,17 @@ function SourcesView({ api, project, sources, setupIssueCount, onChanged, onNext
     <div className="content-grid source-layout">
       <section className="panel source-form-panel">
         <div className="section-heading"><div><span className="eyebrow">1. ADIM · DOSYA EKLE</span><h2>Çizim veya çizelge seçin</h2></div><FilePlus2 size={21} /></div>
-        <label>DXF, Excel veya PDF<div className="path-picker"><input value={path} onChange={(event) => setPath(event.target.value)} placeholder="Dosya seçin veya yolu yazın" /><button onClick={() => void chooseFile()}><FolderOpen size={17} /></button></div></label>
-        <div className="form-row"><label>Proje alanı<select value={discipline} onChange={(event) => { const next = event.target.value as Discipline; setDiscipline(next); setRole(defaultSourceRole(next, sheetKind)); }}>{DISCIPLINES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><label>Bu dosyada ne var?<select value={sheetKind} onChange={(event) => { const next = event.target.value as SheetKind; setSheetKind(next); setRole(defaultSourceRole(discipline, next)); }}>{SHEET_KINDS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label></div>
+        <label>DXF, Excel veya PDF<div className="path-picker"><input value={path} onChange={(event) => changePath(event.target.value)} placeholder="Dosya seçin veya yolu yazın" /><button onClick={() => void chooseFile()}><FolderOpen size={17} /></button></div></label>
+        {path && !inspection && <button className="button secondary source-inspect-button" disabled={inspecting} onClick={() => void inspectPath(path)}>{inspecting ? <LoaderCircle className="spin" size={16} /> : <Focus size={16} />}{inspecting ? "Dosya inceleniyor…" : "Dosyayı ön kontrol et"}</button>}
+        {inspectionError && <div className="inline-error" role="alert">Ön kontrol başarısız: {inspectionError}</div>}
+        {inspection && <div className={`source-inspection ${inspection.unit_conflict ? "warning" : ""}`}><strong>Dosya ön kontrolü</strong>{inspection.source_format === "dxf" && <span>DXF başlığı: {inspection.header_unit === "unknown" ? "birim yok" : inspection.header_unit}{inspection.suggested_unit !== "unknown" && inspection.suggested_unit !== inspection.header_unit ? ` · Alan kanıtı: ${inspection.suggested_unit} öneriyor` : ""}</span>}{inspection.source_format !== "dxf" && <span>{inspection.source_format.toUpperCase()} dosyası; çizim birimi uygulanmaz.</span>}{inspection.discipline_evidence.length > 0 && <small>Pafta ipuçları: {inspection.discipline_evidence.slice(0, 3).join(" · ")}</small>}{inspection.suggested_discipline && <button className="button secondary" onClick={() => chooseDiscipline(inspection.suggested_discipline as Discipline)}>{discipline === inspection.suggested_discipline ? "Önerilen alan seçildi" : `${disciplineLabel(inspection.suggested_discipline)} olarak seç`}</button>}{inspection.unit_conflict && <p>Başlık ve yazılı alanlar çelişiyor. Bilinen bir çizim ölçüsüyle karşılaştırıp kullanılacak birimi açıkça seçin.</p>}</div>}
+        {inspection?.suggested_discipline === "architectural" && discipline === "structural" && <div className="inline-error" role="alert">Bu paftanın başlıkları mimariyi gösteriyor. Statik kolon/kiriş araması için ayrı statik pafta ekleyin.</div>}
+        <div className="form-row"><label>Proje alanı<select value={discipline} onChange={(event) => chooseDiscipline(event.target.value as Discipline)}><option value="">Seçiniz</option>{DISCIPLINES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><label>Bu dosyada ne var?<select value={sheetKind} onChange={(event) => { const next = event.target.value as SheetKind; setSheetKind(next); if (discipline) setRole(defaultSourceRole(discipline, next)); }}>{SHEET_KINDS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label></div>
+        {inspection?.requires_unit_confirmation && <label className="source-unit-choice">Kullanılacak çizim birimi<select value={unit} onChange={(event) => setUnit(event.target.value as DrawingUnit)}><option value="unknown">Ölçüye bakıp seçiniz</option><option value="mm">Milimetre (mm)</option><option value="cm">Santimetre (cm)</option><option value="m">Metre (m)</option></select><small>Öneri otomatik onaylanmaz; seçiminiz hesaplara kaydedilir.</small></label>}
         <div className="form-row"><label>Kat adı<input value={floor} onChange={(event) => setFloor(event.target.value)} placeholder="Örn. Zemin Kat" /></label><label>Kat türü<select value={floorKind} onChange={(event) => setFloorKind(event.target.value as FloorKind)}>{FLOOR_KINDS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label></div>
-        <details className="source-extra"><summary>Diğer dosya bilgileri <span>İsteğe bağlı</span></summary><div className="form-row three"><label>Pafta rolü<input value={role} onChange={(event) => setRole(event.target.value)} placeholder="kalıp / detay / mahal" /></label><label>Revizyon<input value={revision} onChange={(event) => setRevision(event.target.value)} placeholder="R00" /></label><label>Çizim birimi<select value={unit} onChange={(event) => setUnit(event.target.value as DrawingUnit)}><option value="unknown">DXF'ten oku</option><option value="mm">mm</option><option value="cm">cm</option><option value="m">m</option></select></label></div><small>Çizim birimi okunamazsa, analizden önce onayınız istenir.</small></details>
+        <details className="source-extra"><summary>Diğer dosya bilgileri <span>İsteğe bağlı</span></summary><div className="form-row three"><label>Pafta rolü<input value={role} onChange={(event) => setRole(event.target.value)} placeholder="kalıp / detay / mahal" /></label><label>Revizyon<input value={revision} onChange={(event) => setRevision(event.target.value)} placeholder="R00" /></label>{inspection?.source_format === "dxf" && !inspection.requires_unit_confirmation && <label>Çizim birimi<select value={unit} onChange={(event) => setUnit(event.target.value as DrawingUnit)}><option value="unknown">DXF'ten oku</option><option value="mm">mm</option><option value="cm">cm</option><option value="m">m</option></select></label>}</div><small>Çizim birimi çelişirse analizden önce onayınız istenir.</small></details>
         <small className="field-help">Tekrar eden katları gerekirse Gelişmiş araçlar bölümünde ayrıca tanımlayabilirsiniz.</small>
-        <button className="button primary wide" disabled={!path || busy} onClick={() => void addSource()}>{busy ? <LoaderCircle className="spin" size={17} /> : <FilePlus2 size={17} />}Dosyayı ekle</button>
+        <button className="button primary wide" disabled={!path || !inspection || !discipline || (inspection.suggested_discipline === "architectural" && discipline === "structural") || (inspection.source_format === "dxf" && sheetKind === "unspecified") || (inspection.requires_unit_confirmation && unit === "unknown") || busy} onClick={() => void addSource()}>{busy ? <LoaderCircle className="spin" size={17} /> : <FilePlus2 size={17} />}Dosyayı ekle</button>
         <p className="hint">Dosya SHA-256 kimliğiyle proje klasörüne kopyalanır; özgün dosya değiştirilmez.</p>
       </section>
       <section className="panel source-list-panel">

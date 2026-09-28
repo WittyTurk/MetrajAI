@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import shutil
 import sqlite3
@@ -9,6 +10,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .analyzers.source_inspection import inspect_source_file
 from .calculations import calculate_quantities, derive_element_measurements
 from .contracts import (
     AnalysisRun,
@@ -44,6 +46,8 @@ from .contracts import (
     utc_now,
 )
 from .floor_management import infer_floor_kind, infer_sheet_kind, normalize_repeat_floors
+
+LOGGER = logging.getLogger("metrajai.workspace")
 
 MANIFEST_NAME = "manifest.json"
 DATABASE_NAME = "project.metrajai.sqlite3"
@@ -99,6 +103,47 @@ class ProjectWorkspace:
         if previous_version < CURRENT_SCHEMA_VERSION:
             self.manifest.schema_version = CURRENT_SCHEMA_VERSION
             self.save_manifest()
+        self.source_safety_notices = self._quarantine_misclassified_sources()
+
+    def _quarantine_misclassified_sources(self) -> list[str]:
+        """Remove stale derived results from a structural source proved architectural.
+
+        The original source and a pre-change database backup are retained.
+        """
+        conflicts: list[SourceFile] = []
+        notices: list[str] = []
+        for source in self.list_sources():
+            if (
+                source.source_format != SourceFormat.DXF
+                or source.discipline != Discipline.STRUCTURAL
+            ):
+                continue
+            if not self.verify_source_integrity(source):
+                LOGGER.warning("source_integrity_failed source=%s", source.id)
+                continue
+            try:
+                inspection = inspect_source_file(self.source_path(source), check_area=False)
+            except Exception as exc:
+                LOGGER.warning("source_preflight_failed source=%s error=%s", source.id, exc)
+                continue
+            if inspection["suggested_discipline"] != Discipline.ARCHITECTURAL.value:
+                continue
+            conflicts.append(source)
+            notices.append(
+                f"{source.original_name}: mimari pafta statik olarak kayıtlı. "
+                "Kaynak türünü Mimari yapıp yeniden analiz edin."
+            )
+        stale = [source for source in conflicts if self.list_elements(source_id=source.id)]
+        if stale:
+            self.create_backup("misclassified-source-quarantine")
+            with self._connect() as connection:
+                for source in stale:
+                    self._invalidate_source_results(connection, source.id)
+            notices.append(
+                "Yanlış sınıflanan kaynakların eski adayları ve türetilmiş metrajları "
+                "yedek alınarak geçersiz kılındı."
+            )
+        return notices
 
     @classmethod
     def create(cls, root: str | Path, name: str) -> ProjectWorkspace:
@@ -828,6 +873,7 @@ class ProjectWorkspace:
             if cursor.rowcount == 0:
                 raise KeyError(f"Unknown source: {source.id}")
         self.save_manifest()
+        self.source_safety_notices = self._quarantine_misclassified_sources()
         return source, cleared_count
 
     def update_source_mapping(
@@ -1706,6 +1752,7 @@ class ProjectWorkspace:
             "validation_gates": [
                 item.model_dump(mode="json") for item in self.list_validation_gates()
             ],
+            "source_safety_notices": self.source_safety_notices,
         }
 
     def write_report_payload(self, payload: dict, output: str | Path | None = None) -> Path:

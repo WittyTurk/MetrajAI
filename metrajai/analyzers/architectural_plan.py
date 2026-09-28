@@ -1011,6 +1011,7 @@ def extract_architectural_plan(
                 ),
                 source_id=source.id,
                 severity="error",
+                evidence={"area_ratio": ratio, "suggested_unit": suggested},
             )
         )
     if outlier_count:

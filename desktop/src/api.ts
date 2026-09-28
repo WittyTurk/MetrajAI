@@ -20,6 +20,7 @@ import type {
   RepeatAssignment,
   SheetKind,
   SourceFile,
+  SourceInspection,
   ValidationGate,
 } from "./types";
 
@@ -102,6 +103,13 @@ export class EngineApi {
     return this.request<{ path: string | null }>("/system/select-file", {
       method: "POST",
       body: JSON.stringify({ title }),
+    });
+  }
+
+  inspectSource(path: string) {
+    return this.request<SourceInspection>("/system/inspect-source", {
+      method: "POST",
+      body: JSON.stringify({ path }),
     });
   }
 

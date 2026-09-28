@@ -4,6 +4,7 @@ import hmac
 from decimal import Decimal
 from secrets import token_urlsafe
 
+import ezdxf
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -12,6 +13,7 @@ from .analyzers.architectural_plan import (
     apply_architectural_assignments,
     reconcile_architectural_elements,
 )
+from .analyzers.source_inspection import inspect_source_file
 from .commercial import (
     CatalogImportError,
     calculate_offer,
@@ -56,6 +58,10 @@ class ProjectCreateRequest(BaseModel):
 
 
 class ProjectOpenRequest(BaseModel):
+    path: str
+
+
+class SourceInspectRequest(BaseModel):
     path: str
 
 
@@ -246,7 +252,7 @@ class ProjectRegistry:
 
 def create_app(session_token: str | None = None) -> FastAPI:
     token = session_token or token_urlsafe(32)
-    app = FastAPI(title="MetrajAI Local Engine", version="1.3.6")
+    app = FastAPI(title="MetrajAI Local Engine", version="1.3.7")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
@@ -305,6 +311,13 @@ def create_app(session_token: str | None = None) -> FastAPI:
             return {"path": select_file(request.title)}
         except NativeDialogUnavailable as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @app.post("/system/inspect-source")
+    def inspect_source(request: SourceInspectRequest):
+        try:
+            return inspect_source_file(request.path)
+        except (OSError, ValueError, ezdxf.DXFError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.post("/projects")
     def create_project(request: ProjectCreateRequest):

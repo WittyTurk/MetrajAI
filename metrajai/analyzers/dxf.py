@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -33,6 +34,7 @@ from .multiview_structural import (
     filter_multiview_generic_elements,
 )
 from .reference_dxf import extract_reference_dxf
+from .source_inspection import inspect_dxf_document
 from .structural_plan import extract_structural_plans
 
 
@@ -237,6 +239,26 @@ class DxfAnalyzer:
 
         document = ezdxf.readfile(path)
         detected_unit = unit_from_insunits(document.header.get("$INSUNITS", 0))
+        inspection = inspect_dxf_document(document, source.original_name)
+        if (
+            source.discipline == Discipline.STRUCTURAL
+            and inspection["suggested_discipline"] == Discipline.ARCHITECTURAL.value
+        ):
+            return (
+                [],
+                [AnalysisWarning(
+                    code="SOURCE_DISCIPLINE_CONFLICT",
+                    message=(
+                        f"{source.original_name}: pafta başlıkları mimari plan/kesit bağlamını "
+                        "gösteriyor; statik kolon/kiriş tespiti durduruldu. Kaynağı Mimari "
+                        "olarak eşleyin veya statik paftayı ayrıca ekleyin."
+                    ),
+                    source_id=source.id,
+                    severity="error",
+                    evidence={"suggested_discipline": "architectural"},
+                )],
+                detected_unit,
+            )
         if source.discipline == Discipline.STRUCTURAL and source.sheet_kind in {
             SheetKind.DETAIL,
             SheetKind.SECTION,
@@ -276,6 +298,17 @@ class DxfAnalyzer:
             scale: float | None = None
         else:
             scale = unit_scale(chosen_unit)
+        if detected_unit != DrawingUnit.UNKNOWN and chosen_unit != detected_unit:
+            warnings.append(AnalysisWarning(
+                code="DXF_HEADER_UNIT_OVERRIDE",
+                message=(
+                    f"{source.original_name}: DXF başlığı {detected_unit.value}, kullanıcı "
+                    f"onayı {chosen_unit.value}. Farklı birim kanıtları raporda görünür; "
+                    "bilinen bir pafta ölçüsüyle doğrulayın."
+                ),
+                source_id=source.id,
+                evidence={"header_unit": detected_unit.value, "chosen_unit": chosen_unit.value},
+            ))
 
         reference_elements, reference_warnings, reference_activated = extract_reference_dxf(
             document,
@@ -625,6 +658,9 @@ class DxfAnalyzer:
         rule: DetectionRule,
         scale: float | None,
     ) -> DetectedElement | None:
+        if rule.element_type == "column" and entity.dxftype() == "INSERT":
+            if self._is_nonstructural_insert(entity):
+                return None
         raw_points = self._points(entity, scale)
         geometry = Geometry(
             kind=entity.dxftype().lower(),
@@ -768,6 +804,34 @@ class DxfAnalyzer:
             confidence=confidence,
             review_status=status,
             issues=issues,
+        )
+
+    @staticmethod
+    def _is_nonstructural_insert(entity) -> bool:
+        name = normalize_name(str(entity.dxf.name))
+        if re.fullmatch(r"[+\-±]?\d+(?:[.,]\d+)?", name):
+            return True
+        if any(
+            token in name
+            for token in ("KOT", "SEVIYE", "TRETUAR", "RAMPA", "DUVAR", "KAPI", "PENCERE")
+        ):
+            return True
+        block = entity.doc.blocks.get(str(entity.dxf.name)) if entity.doc else None
+        if block is None:
+            return False
+        has_closed_outline = any(
+            item.dxftype() == "LWPOLYLINE" and bool(item.closed)
+            for item in block
+        )
+        if has_closed_outline:
+            return False
+        return any(
+            item.dxftype() in {"TEXT", "MTEXT"}
+            and ("%%P" in str(getattr(item.dxf, "text", "")) or re.fullmatch(
+                r"[+\-±]?\d+(?:[.,]\d+)?",
+                normalize_name(str(getattr(item.dxf, "text", ""))),
+            ))
+            for item in block
         )
 
     @staticmethod

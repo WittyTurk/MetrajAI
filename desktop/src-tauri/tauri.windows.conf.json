@@ -1,0 +1,11 @@
+{
+  "bundle": {
+    "targets": ["nsis"],
+    "resources": ["resources/report-runtime/**/*"],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "offlineInstaller"
+      }
+    }
+  }
+}

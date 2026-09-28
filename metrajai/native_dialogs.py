@@ -94,7 +94,8 @@ def select_file(title: str) -> str | None:
             "Add-Type -AssemblyName System.Windows.Forms; "
             "$dialog = New-Object System.Windows.Forms.OpenFileDialog; "
             f"$dialog.Title = '{escaped_title}'; "
-            "$dialog.Filter = 'Proje kaynakları (*.dxf;*.xlsx;*.xls)|*.dxf;*.xlsx;*.xls'; "
+            "$dialog.Filter = "
+            "'Proje kaynakları (*.dxf;*.xlsx;*.xls;*.pdf)|*.dxf;*.xlsx;*.xls;*.pdf'; "
             "if ($dialog.ShowDialog() -eq 'OK') { $dialog.FileName }"
         )
     if system == "Linux":

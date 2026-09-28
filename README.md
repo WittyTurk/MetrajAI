@@ -152,7 +152,7 @@ Tauri masaüstü uygulaması bir Xcode projesi değildir; Xcode/Command Line Too
 derleme altyapısını sağlar. Rust kurulduktan sonra gerçek yerel pencereyi açmak için:
 
 ```bash
-cd /Users/karakus/Documents/ChatGPT/MetrajAI
+cd /path/to/MetrajAI
 .venv/bin/python scripts/build_macos_ocr.py
 .venv/bin/python scripts/package_sidecar.py  # motor değiştiğinde bir kez
 npm --prefix desktop run tauri dev
@@ -162,7 +162,8 @@ Tauri derlemesi Rust araç zinciri gerektirir. `scripts/package_sidecar.py` Pyth
 motorunu hedef platform sidecar adına paketler. `scripts/build_macos_ocr.py`, taranmış
 PDF metnini cihazda okuyan Apple Vision yardımcısını derler. Excel raporu paket içindeki
 Python çalışma zamanıyla çevrimdışı üretilebilir; geliştirme ortamında isteğe bağlı
-artifact-tool doğrulama yolu da desteklenir. Bu pilot yalnız macOS için paketlenir.
+artifact-tool doğrulama yolu da desteklenir. Windows x64 kurulum paketi için
+[`WINDOWS_BUILD.md`](WINDOWS_BUILD.md) yönergelerine bakın.
 Pilot `.app` yerel ad-hoc kimlikle imzalanır ve paket bütünlüğü doğrulanabilir; Apple
 notarizasyonu ile Developer ID imzası ticari dağıtım aşamasına bırakılmıştır.
 

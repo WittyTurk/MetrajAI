@@ -353,6 +353,7 @@ class AnalysisWarning(BaseModel):
     source_id: str = ""
     element_id: str = ""
     severity: str = "warning"
+    evidence: dict[str, float | str | bool] = Field(default_factory=dict)
 
 
 class AnalysisRun(BaseModel):

@@ -31,6 +31,20 @@ def test_macos_picker_cancellation_returns_none(monkeypatch: pytest.MonkeyPatch)
     assert native_dialogs.select_file("Kaynak seçin") is None
 
 
+def test_windows_picker_accepts_pdf_sources(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(native_dialogs.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(native_dialogs.shutil, "which", lambda _name: "powershell.exe")
+    captured: list[str] = []
+
+    def fake_run(arguments: list[str], **_kwargs) -> subprocess.CompletedProcess[str]:
+        captured.extend(arguments)
+        return subprocess.CompletedProcess(arguments, 0, "C:\\Pilot\\kesit.pdf\n", "")
+
+    monkeypatch.setattr(native_dialogs.subprocess, "run", fake_run)
+    assert native_dialogs.select_file("Kaynak seçin") == "C:\\Pilot\\kesit.pdf"
+    assert "*.pdf" in captured[-1]
+
+
 def test_native_dialog_api_is_session_protected(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("metrajai.api.select_directory", lambda _title: "/tmp/pilot")
     client = TestClient(create_app("dialog-token"))
