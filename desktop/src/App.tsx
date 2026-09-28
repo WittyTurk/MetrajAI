@@ -89,6 +89,14 @@ const SHEET_KINDS: { value: SheetKind; label: string }[] = [
   { value: "other", label: "Diğer / açıklama" },
 ];
 
+function defaultSourceRole(discipline: Discipline, sheetKind: SheetKind) {
+  const roles: Partial<Record<SheetKind, string>> = {
+    column_application: "kolon aplikasyonu", rebar_plan: "donatı", foundation: "temel",
+    detail: "detay", schedule: "çizelge", section: "kesit", elevation: "görünüş", other: "açıklama",
+  };
+  return roles[sheetKind] ?? ({ structural: "kalip", architectural: "mimari", landscape: "çevre", mechanical: "mekanik", electrical: "elektrik" } as Record<Discipline, string>)[discipline];
+}
+
 const STATUS_LABELS: Record<ReviewStatus, string> = {
   pending: "Onay bekliyor",
   needs_review: "Eksik bilgi",
@@ -136,6 +144,7 @@ function App() {
   const [offerScenarios, setOfferScenarios] = useState<OfferScenario[]>([]);
   const [validationGates, setValidationGates] = useState<ValidationGate[]>([]);
   const [view, setView] = useState<View>("sources");
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [run, setRun] = useState<AnalysisRun | null>(null);
   const [message, setMessage] = useState("");
 
@@ -244,6 +253,18 @@ function App() {
   const pendingCount =
     (project.review_counts.pending ?? 0) + (project.review_counts.needs_review ?? 0);
   const analysisActive = run != null && ["queued", "running"].includes(run.status);
+  const setupIssueCount = sources.filter(sourceNeedsSetup).length;
+  const reviewComplete = elements.length > 0 && pendingCount === 0;
+  const quantitiesComplete = quantities.length > 0 && pendingCount === 0;
+  const advancedActive = ["floors", "mapping", "revisions"].includes(view);
+  function continueToReview() {
+    if (setupIssueCount > 0) {
+      setAdvancedOpen(true);
+      setView("mapping");
+      return;
+    }
+    void startAnalysis();
+  }
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -267,15 +288,22 @@ function App() {
             }}
           ><FolderOpen size={14} /> Projelere dön</button>
         </div>
-        <nav className="workflow-nav" aria-label="İş akışı">
-          <NavItem index="01" label="Kaynak dosyalar" active={view === "sources"} complete={sources.length > 0} onClick={() => setView("sources")} />
-          <NavItem index="02" label="Kat ve tekrarlar" active={view === "floors"} complete={floors.length > 0} onClick={() => setView("floors")} />
-          <NavItem index="03" label="Birim ve eşleme" active={view === "mapping"} complete={sources.length > 0 && sources.every((source) => source.source_format !== "dxf" || source.unit_confirmed || source.detected_unit !== "unknown")} onClick={() => setView("mapping")} />
-          <NavItem index="04" label="Tespit ve onay" active={view === "review"} complete={elements.length > 0 && pendingCount === 0} onClick={() => setView("review")} />
-          <NavItem index="05" label="Kesin metraj" active={view === "quantities"} complete={quantities.length > 0} onClick={() => setView("quantities")} />
-          <NavItem index="06" label="Fiyat ve teklif" active={view === "commercial"} complete={priceMappings.some((item) => item.status === "approved")} onClick={() => setView("commercial")} />
-          <NavItem index="07" label="Revizyon karşılaştır" active={view === "revisions"} complete={false} onClick={() => setView("revisions")} />
+        <span className="sidebar-section-label">PROJE AKIŞI</span>
+        <nav className="workflow-nav" aria-label="Proje adımları">
+          <StageNavItem index="1" label="Dosyaları ekle" status={sources.length === 0 ? "Dosya bekleniyor" : setupIssueCount ? `${setupIssueCount} dosyada ayar gerekli` : `${sources.length} dosya hazır`} active={view === "sources"} complete={sources.length > 0 && setupIssueCount === 0} onClick={() => setView("sources")} />
+          <StageNavItem index="2" label="Ölçüleri kontrol et" status={elements.length === 0 ? "Analiz yapılmadı" : pendingCount ? `${pendingCount} karar bekliyor` : "Kararlar tamamlandı"} active={view === "review"} complete={reviewComplete} onClick={() => setView("review")} />
+          <StageNavItem index="3" label="Sonuçları al" status={quantities.length === 0 ? "Henüz sonuç yok" : pendingCount ? "Kısmi sonuç" : `${quantities.length} kesin satır`} active={view === "quantities"} complete={quantitiesComplete} onClick={() => setView("quantities")} />
         </nav>
+        <div className="sidebar-tools">
+          <span className="sidebar-section-label">İSTEĞE BAĞLI</span>
+          <ToolNavItem icon={<BadgeDollarSign size={17} />} label="Teklif hazırla" active={view === "commercial"} onClick={() => setView("commercial")} />
+          <button className={`advanced-toggle ${advancedActive ? "active" : ""}`} aria-expanded={advancedOpen} aria-controls="advanced-tools" onClick={() => setAdvancedOpen(!advancedOpen)}><span>Gelişmiş araçlar</span><ChevronRight size={16} /></button>
+          {advancedOpen && <nav id="advanced-tools" className="advanced-tools" aria-label="Gelişmiş araçlar">
+            <ToolNavItem icon={<Layers3 size={16} />} label="Kat ve tekrarlar" active={view === "floors"} onClick={() => setView("floors")} />
+            <ToolNavItem icon={<Gauge size={16} />} label="Birim ve eşleme" active={view === "mapping"} onClick={() => setView("mapping")} />
+            <ToolNavItem icon={<GitCompareArrows size={16} />} label="Revizyon karşılaştır" active={view === "revisions"} onClick={() => setView("revisions")} />
+          </nav>}
+        </div>
         <div className="safety-note">
           <ShieldCheck size={18} />
           <div><strong>Güvenli hesap</strong><span>Onaysız elemanlar toplam dışındadır.</span></div>
@@ -287,6 +315,7 @@ function App() {
           <div>
             <span className="eyebrow">YEREL PROJE · {project.project.project_id.slice(-8).toUpperCase()}</span>
             <h1>{viewTitle(view)}</h1>
+            <p className="topbar-description">{viewDescription(view)}</p>
           </div>
           <div className="topbar-actions">
             {run && ["queued", "running"].includes(run.status) && (
@@ -297,19 +326,19 @@ function App() {
               </div>
             )}
             {run && ["queued", "running"].includes(run.status) && <button className="button secondary" onClick={() => void cancelAnalysis()}><CircleStop size={16} /> İptal et</button>}
-            <button className="button primary" disabled={sources.length === 0 || (run != null && ["queued", "running"].includes(run.status))} onClick={() => void startAnalysis()}>
-              <Play size={16} fill="currentColor" /> Analizi başlat
-            </button>
+            {["sources", "review", "mapping"].includes(view) && <button className="button primary" disabled={sources.length === 0 || analysisActive} onClick={continueToReview}>
+              {setupIssueCount ? <Gauge size={16} /> : <Play size={16} fill="currentColor" />}{setupIssueCount ? "Eksik ayarları tamamla" : elements.length ? "Analizi yenile" : "Ölçüleri bul"}
+            </button>}
           </div>
         </header>
 
         {message && <div className="banner error"><AlertTriangle size={18} /><span>{message}</span><button onClick={() => setMessage("")}><X size={16} /></button></div>}
 
-        {view === "sources" && <SourcesView api={api} project={project} sources={sources} onChanged={() => void refresh()} onNext={() => setView("floors")} onError={setMessage} />}
+        {view === "sources" && <SourcesView api={api} project={project} sources={sources} setupIssueCount={setupIssueCount} onChanged={() => void refresh()} onNext={continueToReview} onError={setMessage} />}
         {view === "floors" && <FloorsView api={api} projectId={project.project.project_id} sources={sources} elements={elements} floors={floors} repeatAssignments={repeatAssignments} onChanged={() => void refresh()} onError={setMessage} onNext={() => setView("mapping")} />}
         {view === "mapping" && <MappingView api={api} projectId={project.project.project_id} sources={sources} onChanged={() => void refresh()} onError={setMessage} onNext={() => void startAnalysis()} />}
-        {view === "review" && <ReviewView api={api} projectId={project.project.project_id} elements={elements} assignments={architecturalAssignments} warnings={warnings} onChanged={() => void refresh()} onError={setMessage} onNext={() => setView("quantities")} />}
-        {view === "quantities" && <QuantitiesView api={api} projectId={project.project.project_id} quantities={quantities} pendingCount={pendingCount} onMessage={setMessage} />}
+        {view === "review" && <ReviewView api={api} projectId={project.project.project_id} elements={elements} assignments={architecturalAssignments} warnings={warnings} hasSources={sources.length > 0} analysisActive={analysisActive} onSources={() => setView("sources")} onAnalyze={continueToReview} onChanged={() => void refresh()} onError={setMessage} onNext={() => setView("quantities")} />}
+        {view === "quantities" && <QuantitiesView api={api} projectId={project.project.project_id} quantities={quantities} pendingCount={pendingCount} onReview={() => setView("review")} onCommercial={() => setView("commercial")} onMessage={setMessage} />}
         {view === "commercial" && <CommercialView api={api} projectId={project.project.project_id} quantities={quantities} catalogs={priceCatalogs} priceItems={priceItems} mappings={priceMappings} scenarios={offerScenarios} gates={validationGates} onChanged={() => void refresh()} onError={setMessage} />}
         {view === "revisions" && <RevisionComparisonView api={api} projectId={project.project.project_id} sources={sources} />}
       </main>
@@ -573,11 +602,15 @@ function RecentProjects({ projects, busy, busyPath, error, onOpen, onRemove, onB
   );
 }
 
-function NavItem({ index, label, active, complete, onClick }: { index: string; label: string; active: boolean; complete: boolean; onClick: () => void }) {
-  return <button className={`nav-item ${active ? "active" : ""}`} onClick={onClick}><span className="nav-index">{complete ? <Check size={14} /> : index}</span><span>{label}</span><ChevronRight size={15} /></button>;
+function StageNavItem({ index, label, status, active, complete, onClick }: { index: string; label: string; status: string; active: boolean; complete: boolean; onClick: () => void }) {
+  return <button className={`stage-nav-item ${active ? "active" : ""}`} aria-current={active ? "step" : undefined} onClick={onClick}><span className="stage-index">{complete ? <Check size={15} /> : index}</span><span className="stage-copy"><strong>{label}</strong><small>{status}</small></span><ChevronRight size={15} /></button>;
 }
 
-function SourcesView({ api, project, sources, onChanged, onNext, onError }: { api: EngineApi; project: ProjectSummary; sources: SourceFile[]; onChanged: () => void; onNext: () => void; onError: (message: string) => void }) {
+function ToolNavItem({ icon, label, active, onClick }: { icon: React.ReactNode; label: string; active: boolean; onClick: () => void }) {
+  return <button className={`tool-nav-item ${active ? "active" : ""}`} aria-current={active ? "page" : undefined} onClick={onClick}><span>{icon}</span><strong>{label}</strong><ChevronRight size={14} /></button>;
+}
+
+function SourcesView({ api, project, sources, setupIssueCount, onChanged, onNext, onError }: { api: EngineApi; project: ProjectSummary; sources: SourceFile[]; setupIssueCount: number; onChanged: () => void; onNext: () => void; onError: (message: string) => void }) {
   const [path, setPath] = useState("");
   const [discipline, setDiscipline] = useState<Discipline>("structural");
   const [role, setRole] = useState("kalip");
@@ -662,13 +695,13 @@ function SourcesView({ api, project, sources, onChanged, onNext, onError }: { ap
   return (
     <div className="content-grid source-layout">
       <section className="panel source-form-panel">
-        <div className="section-heading"><div><span className="eyebrow">KAYNAK EKLE</span><h2>Değiştirilmeyen pafta</h2></div><FilePlus2 size={21} /></div>
+        <div className="section-heading"><div><span className="eyebrow">1. ADIM · DOSYA EKLE</span><h2>Çizim veya çizelge seçin</h2></div><FilePlus2 size={21} /></div>
         <label>DXF, Excel veya PDF<div className="path-picker"><input value={path} onChange={(event) => setPath(event.target.value)} placeholder="Dosya seçin veya yolu yazın" /><button onClick={() => void chooseFile()}><FolderOpen size={17} /></button></div></label>
-        <div className="form-row"><label>Disiplin<select value={discipline} onChange={(event) => setDiscipline(event.target.value as Discipline)}>{DISCIPLINES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><label>Pafta rolü<input value={role} onChange={(event) => setRole(event.target.value)} placeholder="kalip / detay / mahal" /></label></div>
-        <div className="form-row"><label>Kat türü<select value={floorKind} onChange={(event) => setFloorKind(event.target.value as FloorKind)}>{FLOOR_KINDS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><label>Pafta türü<select value={sheetKind} onChange={(event) => setSheetKind(event.target.value as SheetKind)}>{SHEET_KINDS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label></div>
-        <div className="form-row three"><label>Kat<input value={floor} onChange={(event) => setFloor(event.target.value)} /></label><label>Revizyon<input value={revision} onChange={(event) => setRevision(event.target.value)} placeholder="R00" /></label><label>Çizim birimi<select value={unit} onChange={(event) => setUnit(event.target.value as DrawingUnit)}><option value="unknown">DXF'ten oku</option><option value="mm">mm</option><option value="cm">cm</option><option value="m">m</option></select></label></div>
-        <small className="field-help">Kat tekrarları sonraki ekranda M1–M4 gibi eleman/şablon bazında ve mühendis onayıyla tanımlanır.</small>
-        <button className="button primary wide" disabled={!path || busy} onClick={() => void addSource()}>{busy ? <LoaderCircle className="spin" size={17} /> : <FilePlus2 size={17} />}Kaynağı projeye al</button>
+        <div className="form-row"><label>Proje alanı<select value={discipline} onChange={(event) => { const next = event.target.value as Discipline; setDiscipline(next); setRole(defaultSourceRole(next, sheetKind)); }}>{DISCIPLINES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><label>Bu dosyada ne var?<select value={sheetKind} onChange={(event) => { const next = event.target.value as SheetKind; setSheetKind(next); setRole(defaultSourceRole(discipline, next)); }}>{SHEET_KINDS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label></div>
+        <div className="form-row"><label>Kat adı<input value={floor} onChange={(event) => setFloor(event.target.value)} placeholder="Örn. Zemin Kat" /></label><label>Kat türü<select value={floorKind} onChange={(event) => setFloorKind(event.target.value as FloorKind)}>{FLOOR_KINDS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label></div>
+        <details className="source-extra"><summary>Diğer dosya bilgileri <span>İsteğe bağlı</span></summary><div className="form-row three"><label>Pafta rolü<input value={role} onChange={(event) => setRole(event.target.value)} placeholder="kalıp / detay / mahal" /></label><label>Revizyon<input value={revision} onChange={(event) => setRevision(event.target.value)} placeholder="R00" /></label><label>Çizim birimi<select value={unit} onChange={(event) => setUnit(event.target.value as DrawingUnit)}><option value="unknown">DXF'ten oku</option><option value="mm">mm</option><option value="cm">cm</option><option value="m">m</option></select></label></div><small>Çizim birimi okunamazsa, analizden önce onayınız istenir.</small></details>
+        <small className="field-help">Tekrar eden katları gerekirse Gelişmiş araçlar bölümünde ayrıca tanımlayabilirsiniz.</small>
+        <button className="button primary wide" disabled={!path || busy} onClick={() => void addSource()}>{busy ? <LoaderCircle className="spin" size={17} /> : <FilePlus2 size={17} />}Dosyayı ekle</button>
         <p className="hint">Dosya SHA-256 kimliğiyle proje klasörüne kopyalanır; özgün dosya değiştirilmez.</p>
       </section>
       <section className="panel source-list-panel">
@@ -676,7 +709,8 @@ function SourcesView({ api, project, sources, onChanged, onNext, onError }: { ap
         <div className="source-list">
           {sources.length === 0 ? <EmptyState icon={<Boxes />} title="Henüz kaynak yok" detail="İlk DXF paftasını veya referans çizelgesini ekleyin." /> : sources.map((source) => <div className="source-row" key={source.id}><div className={`file-icon ${source.discipline}`}>{source.original_name.split(".").pop()?.toUpperCase()}</div><div className="source-main"><strong>{source.original_name}</strong><span>{disciplineLabel(source.discipline)} · {sheetKindLabel(source.sheet_kind)} · {floorKindLabel(source.floor_kind)} / {source.floor}</span><small>SHA {source.sha256.slice(0, 12)}</small></div><div className="source-actions"><select className="source-discipline" aria-label={`${source.original_name} disiplini`} value={source.discipline} disabled={updatingId === source.id} onChange={(event) => void changeDiscipline(source, event.target.value as Discipline)}>{DISCIPLINES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select><div className={`unit-pill ${sourceStatusReady(source) ? "confirmed" : ""}`}>{sourceStatusLabel(source)}</div><button className="source-delete" aria-label={`${source.original_name} kaynağını sil`} title="Kaynağı sil" disabled={deletingId === source.id} onClick={() => void removeSource(source)}>{deletingId === source.id ? <LoaderCircle className="spin" size={16} /> : <Trash2 size={16} />}</button></div></div>)}
         </div>
-        <button className="button secondary next-button" disabled={sources.length === 0} onClick={onNext}>Kat ve tekrarlara geç <ChevronRight size={16} /></button>
+        {setupIssueCount > 0 && <div className="source-setup-note"><AlertTriangle size={17} /><span>{setupIssueCount} dosyada birim, ölçek veya pafta görevi doğrulaması gerekiyor. Ölçü çıkarmadan önce bunları kontrol edeceğiz.</span></div>}
+        <button className="button secondary next-button" disabled={sources.length === 0} onClick={onNext}>{setupIssueCount ? "Eksik ayarları kontrol et" : "Ölçüleri bul"} <ChevronRight size={16} /></button>
       </section>
     </div>
   );
@@ -852,7 +886,7 @@ interface RebarRevisionCandidate {
   scope_labels: string[];
 }
 
-function ReviewView({ api, projectId, elements, assignments, warnings, onChanged, onError, onNext }: { api: EngineApi; projectId: string; elements: DetectedElement[]; assignments: ArchitecturalAssignment[]; warnings: AnalysisWarning[]; onChanged: () => void; onError: (message: string) => void; onNext: () => void }) {
+function ReviewView({ api, projectId, elements, assignments, warnings, hasSources, analysisActive, onSources, onAnalyze, onChanged, onError, onNext }: { api: EngineApi; projectId: string; elements: DetectedElement[]; assignments: ArchitecturalAssignment[]; warnings: AnalysisWarning[]; hasSources: boolean; analysisActive: boolean; onSources: () => void; onAnalyze: () => void; onChanged: () => void; onError: (message: string) => void; onNext: () => void }) {
   const [filter, setFilter] = useState<ReviewStatus | "all">("all");
   const [typeFilter, setTypeFilter] = useState<string>("all");
   const [floorFilter, setFloorFilter] = useState<string>("all");
@@ -944,6 +978,8 @@ function ReviewView({ api, projectId, elements, assignments, warnings, onChanged
       setBusy(false);
     }
   }
+
+  if (elements.length === 0) return <div className="stack"><section className="panel review-empty-panel"><div className="review-empty-icon"><Ruler size={26} /></div><span className="eyebrow">2. ADIM · ÖLÇÜLERİ KONTROL ET</span><h2>{analysisActive ? "Çizimler inceleniyor" : "Henüz incelenecek ölçü yok"}</h2><p>{analysisActive ? "Dosyalar işlenirken bu ekrandan ayrılabilirsiniz. Tespitler hazır olunca burada görünecek." : "Dosyaları ekleyip ölçüleri bulun. Bulunan elemanlar mühendis onayı olmadan kesin metraja girmez."}</p><button className="button primary" disabled={analysisActive} onClick={hasSources ? onAnalyze : onSources}>{analysisActive ? <LoaderCircle className="spin" size={16} /> : hasSources ? <Play size={16} fill="currentColor" /> : <FilePlus2 size={16} />}{analysisActive ? "Analiz sürüyor" : hasSources ? "Ölçüleri bul" : "Dosyaları ekle"}</button></section>{warnings.length > 0 && <section className="panel review-empty-warnings"><strong>Analiz uyarıları</strong>{warnings.map((warning) => <p key={warning.id}>{warning.message}</p>)}</section>}</div>;
 
   return <div className="review-layout">
     <section className="panel preview-panel">
@@ -1304,10 +1340,19 @@ function GeometryPreview({ elements, selectedId, relatedIds = [], onSelect }: { 
   </div>;
 }
 
-function QuantitiesView({ api, projectId, quantities, pendingCount, onMessage }: { api: EngineApi; projectId: string; quantities: QuantityLine[]; pendingCount: number; onMessage: (message: string) => void }) {
+function QuantitiesView({ api, projectId, quantities, pendingCount, onReview, onCommercial, onMessage }: { api: EngineApi; projectId: string; quantities: QuantityLine[]; pendingCount: number; onReview: () => void; onCommercial: () => void; onMessage: (message: string) => void }) {
   const totals = useMemo(() => { const grouped = new Map<string, { category: string; unit: string; value: number }>(); quantities.forEach((line) => { const key = `${line.category}|${line.unit}`; const current = grouped.get(key) ?? { category: line.category, unit: line.unit, value: 0 }; current.value += line.quantity; grouped.set(key, current); }); return Array.from(grouped.values()); }, [quantities]);
   async function exportPayload() { const result = await api.exportReport(projectId); onMessage(`Excel raporu oluşturuldu: ${result.path}`); }
-  return <div className="stack"><section className={`callout ${pendingCount ? "warning" : "success"}`}>{pendingCount ? <AlertTriangle size={22} /> : <ShieldCheck size={22} />}<div><strong>{pendingCount ? "Kesin toplam dışında bekleyen elemanlar var" : "Mühendis onaylı kesin metraj"}</strong><p>{pendingCount ? `${pendingCount} eleman onaylanana kadar aşağıdaki toplamların dışında tutulur.` : "Tüm satırlar onaylı bir kaynak elemana ve açık formüle bağlıdır."}</p></div></section><div className="metric-grid">{totals.length ? totals.map((total) => <div className="metric-card" key={`${total.category}-${total.unit}`}><span>{total.category}</span><strong>{formatQuantity(total.value)}</strong><small>{total.unit}</small></div>) : <div className="metric-card empty"><span>Henüz kesin metraj yok</span><strong>0</strong><small>Onay bekleniyor</small></div>}</div><section className="panel"><div className="section-heading"><div><span className="eyebrow">İZLENEBİLİR METRAJ</span><h2>{quantities.length} hesap satırı</h2></div><button className="button primary" disabled={quantities.length === 0} onClick={() => void exportPayload()}><FileSpreadsheet size={17} /> Excel raporu hazırla</button></div><div className="quantity-table"><div className="quantity-head"><span>Kat / Disiplin</span><span>Kalem</span><span>Formül</span><span>Miktar</span></div>{quantities.map((line) => <div className="quantity-row" key={line.id}><span><strong>{line.floor}</strong><small>{disciplineLabel(line.discipline)}</small></span><span><strong>{line.description}</strong><small>{line.element_id.slice(-10)}</small></span><code>{line.formula}</code><span className="quantity-value">{formatQuantity(line.quantity)} <small>{line.unit}</small></span></div>)}{quantities.length === 0 && <EmptyState icon={<FileSpreadsheet />} title="Onaylı hesap satırı yok" detail="Tespit ekranında eleman ölçülerini doğrulayıp onaylayın." />}</div></section></div>;
+  return <div className="stack">
+    <section className={`callout ${pendingCount || quantities.length === 0 ? "warning" : "success"}`}>
+      {pendingCount || quantities.length === 0 ? <AlertTriangle size={22} /> : <ShieldCheck size={22} />}
+      <div><strong>{quantities.length === 0 ? "Henüz kesin metraj yok" : pendingCount ? "Bekleyen elemanlar toplam dışında" : "Mühendis onaylı kesin metraj"}</strong><p>{pendingCount ? `${pendingCount} eleman onaylanana kadar aşağıdaki toplamlara dahil edilmez.` : quantities.length === 0 ? "Ölçüleri kontrol edip uygun elemanları onaylayın." : "Tüm satırlar onaylı bir kaynak elemana ve açık formüle bağlıdır."}</p></div>
+      {(pendingCount > 0 || quantities.length === 0) && <button className="button secondary" onClick={onReview}>Ölçüleri kontrol et <ChevronRight size={15} /></button>}
+    </section>
+    <div className="metric-grid">{totals.length ? totals.map((total) => <div className="metric-card" key={`${total.category}-${total.unit}`}><span>{total.category}</span><strong>{formatQuantity(total.value)}</strong><small>{total.unit}</small></div>) : <div className="metric-card empty"><span>Henüz kesin metraj yok</span><strong>—</strong><small>Onay bekleniyor</small></div>}</div>
+    <section className="panel"><div className="section-heading"><div><span className="eyebrow">İZLENEBİLİR METRAJ</span><h2>{quantities.length} hesap satırı</h2></div><button className="button primary" disabled={quantities.length === 0} onClick={() => void exportPayload()}><FileSpreadsheet size={17} /> Excel raporu hazırla</button></div><div className="quantity-table"><div className="quantity-head"><span>Kat / Disiplin</span><span>Kalem</span><span>Formül</span><span>Miktar</span></div>{quantities.map((line) => <div className="quantity-row" key={line.id}><span><strong>{line.floor}</strong><small>{disciplineLabel(line.discipline)}</small></span><span><strong>{line.description}</strong><small>{line.element_id.slice(-10)}</small></span><code>{line.formula}</code><span className="quantity-value">{formatQuantity(line.quantity)} <small>{line.unit}</small></span></div>)}{quantities.length === 0 && <EmptyState icon={<FileSpreadsheet />} title="Onaylı hesap satırı yok" detail="Ölçüleri kontrol edip uygun elemanları onaylayın." />}</div></section>
+    {quantities.length > 0 && pendingCount === 0 && <div className="footer-action"><p>İsterseniz onaylı metrajı birim fiyatlarla eşleştirerek teklif hazırlayabilirsiniz.</p><button className="button secondary" onClick={onCommercial}><BadgeDollarSign size={16} /> Teklif hazırla</button></div>}
+  </div>;
 }
 
 function CommercialView({ api, projectId, quantities, catalogs, priceItems, mappings, scenarios, gates, onChanged, onError }: { api: EngineApi; projectId: string; quantities: QuantityLine[]; catalogs: PriceCatalog[]; priceItems: PriceItem[]; mappings: PriceMapping[]; scenarios: OfferScenario[]; gates: ValidationGate[]; onChanged: () => void; onError: (message: string) => void }) {
@@ -1432,7 +1477,8 @@ function RevisionComparisonView({ api, projectId, sources }: { api: EngineApi; p
 }
 
 function EmptyState({ icon, title, detail }: { icon: React.ReactNode; title: string; detail: string }) { return <div className="empty-state"><span>{icon}</span><strong>{title}</strong><p>{detail}</p></div>; }
-function viewTitle(view: View) { return ({ sources: "Kaynak dosyalar", floors: "Kat ve tekrar yönetimi", mapping: "Birim ve eşleme", review: "Tespit ve mühendis onayı", quantities: "Kesin metraj", commercial: "Fiyat ve teklif", revisions: "Revizyon karşılaştırması" })[view]; }
+function viewTitle(view: View) { return ({ sources: "Dosyaları ekle", floors: "Kat ve tekrarlar", mapping: "Birim ve eşleme", review: "Ölçüleri kontrol et", quantities: "Sonuçları al", commercial: "Teklif hazırla", revisions: "Revizyon karşılaştırması" })[view]; }
+function viewDescription(view: View) { return ({ sources: "DXF, PDF veya Excel dosyalarını bu projeye ekleyin.", floors: "Yalnız gerekli katları ve onaylı tekrarları tanımlayın.", mapping: "Eksik birim, ölçek ve pafta görevlerini doğrulayın.", review: "Bulunan elemanları ve ölçülerini inceleyip onaylayın.", quantities: "Yalnız onaylı metrajı görün ve Excel raporu alın.", commercial: "İsterseniz metrajı birim fiyatlarla eşleştirin.", revisions: "İki pafta arasındaki değişiklikleri inceleyin." })[view]; }
 function disciplineLabel(value: Discipline) { return DISCIPLINES.find((item) => item.value === value)?.label ?? value; }
 function floorKindLabel(value: FloorKind) { return FLOOR_KINDS.find((item) => item.value === value)?.label ?? value; }
 function sheetKindLabel(value: SheetKind) { return SHEET_KINDS.find((item) => item.value === value)?.label ?? value; }
@@ -1443,5 +1489,11 @@ function formatSigned(value: number) { return `${value >= 0 ? "+" : ""}${formatQ
 function revisionMeasurements(values: Record<string, number>) { const keys = ["width_m", "depth_m", "height_m", "length_m", "area_m2", "thickness_m", "void_area_m2", "plan_area_m2", "total_rise_m"]; const parts = keys.filter((key) => values[key] !== undefined).map((key) => `${measurementLabel("", key)}: ${formatQuantity(values[key])}`); return parts.length ? parts.join(" · ") : "—"; }
 function sourceStatusReady(source: SourceFile) { if (source.source_format === "pdf") return source.calibration_status === "confirmed"; if (source.source_format !== "dxf") return true; return source.unit_confirmed || source.detected_unit !== "unknown"; }
 function sourceStatusLabel(source: SourceFile) { if (source.source_format === "pdf") return source.calibration_status === "confirmed" ? "ölçek onaylı" : "ölçek bekliyor"; if (source.source_format !== "dxf") return source.source_format.toUpperCase(); return source.unit_confirmed ? source.drawing_unit : source.detected_unit !== "unknown" ? `${source.detected_unit} algılandı` : "birim bekliyor"; }
+function sourceNeedsSetup(source: SourceFile) {
+  if (source.source_format === "pdf") return source.calibration_status !== "confirmed";
+  if (source.source_format !== "dxf") return false;
+  if (source.discipline === "structural" && source.sheet_kind === "unspecified") return true;
+  return !source.unit_confirmed && source.detected_unit === "unknown" && !(source.discipline === "structural" && ["detail", "section", "elevation", "other"].includes(source.sheet_kind));
+}
 
 export default App;
